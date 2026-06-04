@@ -6,6 +6,7 @@ const state = {
   sessions: new Map(), // id -> SessionView
   selected: null, // 선택된 세션 id
   ws: null,
+  drafts: new Map(), // sessionId -> 입력 중인(아직 전송 안 한) 텍스트
 };
 
 // ---------- 인증 ----------
@@ -69,6 +70,7 @@ function handleEvent(ev) {
     state.sessions.set(ev.session.id, ev.session);
   } else if (ev.type === 'session_removed') {
     state.sessions.delete(ev.sessionId);
+    state.drafts.delete(ev.sessionId);
     if (state.selected === ev.sessionId) state.selected = null;
   }
   render();
@@ -81,11 +83,26 @@ const STATUS_KO = {
 };
 
 function render() {
+  // 재렌더 전에 입력창 포커스/커서 위치를 기억해 둔다 (이벤트 도중 타이핑 끊김 방지)
+  const active = document.activeElement;
+  const promptFocused = !!active && active.id === 'prompt';
+  const caretStart = promptFocused ? active.selectionStart : null;
+  const caretEnd = promptFocused ? active.selectionEnd : null;
+
   // 폰 마스터-디테일: 유효한 세션이 선택됐을 때만 상세 화면을 보인다
   const hasSel = state.selected != null && state.sessions.has(state.selected);
   document.body.classList.toggle('viewing', hasSel);
   renderList();
   renderDetail();
+
+  // 입력 중이었다면 포커스와 커서 위치를 복원한다
+  if (promptFocused) {
+    const p = $('prompt');
+    if (p) {
+      p.focus();
+      if (caretStart != null) p.setSelectionRange(caretStart, caretEnd);
+    }
+  }
 }
 
 function renderList() {
@@ -141,13 +158,21 @@ function renderDetail() {
   $('d-interrupt').onclick = () => api('POST', `/sessions/${s.id}/interrupt`).catch(showErr);
   $('d-remove').onclick = () => { if (confirm('이 세션을 종료할까요?')) api('DELETE', `/sessions/${s.id}`).catch(showErr); };
 
+  // 입력 중이던 초안을 복원하고, 타이핑할 때마다 초안을 저장한다 (재렌더에도 보존)
+  const prompt = $('prompt');
+  prompt.value = state.drafts.get(s.id) || '';
+  prompt.addEventListener('input', () => state.drafts.set(s.id, prompt.value));
+
   const send = () => {
-    const text = $('prompt').value.trim();
+    const text = prompt.value.trim();
     if (!text) return;
-    api('POST', `/sessions/${s.id}/prompt`, { text }).then(() => { $('prompt').value = ''; }).catch(showErr);
+    api('POST', `/sessions/${s.id}/prompt`, { text }).then(() => {
+      state.drafts.delete(s.id);
+      prompt.value = '';
+    }).catch(showErr);
   };
   $('send').onclick = send;
-  $('prompt').addEventListener('keydown', (e) => {
+  prompt.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
   });
 
