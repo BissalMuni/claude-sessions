@@ -1,0 +1,132 @@
+:root {
+  --bg: #0b0e14;
+  --panel: #131722;
+  --panel2: #1b2130;
+  --line: #283044;
+  --text: #e6e9ef;
+  --muted: #8b94a7;
+  --accent: #3b82f6;
+  --green: #22c55e;
+  --amber: #f59e0b;
+  --red: #ef4444;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+.hidden { display: none !important; }
+button {
+  font: inherit; cursor: pointer; border: none; border-radius: 8px;
+  padding: 10px 14px; background: var(--accent); color: white;
+}
+button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); padding: 7px 11px; }
+button:active { transform: translateY(1px); }
+input, textarea {
+  font: inherit; width: 100%; background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 8px; padding: 11px;
+}
+.err { color: var(--red); font-size: 13px; min-height: 18px; margin-top: 6px; }
+
+/* 게이트 / 모달 */
+.gate, .modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,.6);
+  display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 10;
+}
+.gate-box, .modal-box {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+  padding: 22px; width: 100%; max-width: 380px;
+}
+.gate-box h1, .modal-box h2 { margin: 0 0 10px; }
+.gate-box p { color: var(--muted); margin: 0 0 14px; }
+.gate-box input, .modal-box input { margin-bottom: 12px; }
+.gate-box button { width: 100%; }
+.modal-box label { display: block; font-size: 13px; color: var(--muted); margin: 4px 0; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 8px; }
+
+/* 폴더 피커 */
+.picker { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+.picker-here { padding: 7px 10px; font-size: 12px; color: var(--muted); background: var(--panel2); border-bottom: 1px solid var(--line); word-break: break-all; }
+.picker-list { max-height: 200px; overflow-y: auto; }
+.picker-row { padding: 9px 10px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
+.picker-row:last-child { border-bottom: none; }
+.picker-row:active { background: var(--panel2); }
+.picker-row.up { color: var(--muted); }
+
+/* 레이아웃 */
+.app { display: flex; flex-direction: column; height: 100%; }
+.topbar {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.topbar strong { margin-right: auto; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); flex: none; }
+.dot.on { background: var(--green); }
+.layout { flex: 1; display: flex; min-height: 0; }
+.list { width: 240px; border-right: 1px solid var(--line); overflow-y: auto; flex: none; background: var(--panel); }
+.detail { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.empty { margin: auto; color: var(--muted); }
+
+/* 세션 목록 항목 */
+.item { padding: 12px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.item.active { background: var(--panel2); }
+.item .row { display: flex; align-items: center; gap: 8px; }
+.item .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .cwd { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; flex: none; text-transform: uppercase; letter-spacing: .03em; }
+.badge.idle { background: #1e2636; color: var(--muted); }
+.badge.starting { background: #1e2636; color: var(--muted); }
+.badge.thinking { background: #1e293b; color: #93c5fd; }
+.badge.awaiting_permission { background: #3a2a08; color: var(--amber); }
+.badge.done { background: #0f2a16; color: var(--green); }
+.badge.error { background: #3a1313; color: var(--red); }
+
+/* 상세 */
+.detail-head { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--panel); }
+.detail-head .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-head .actions { margin-left: auto; display: flex; gap: 8px; }
+.log { flex: 1; overflow-y: auto; padding: 12px 14px; }
+.msg { margin-bottom: 12px; white-space: pre-wrap; word-break: break-word; }
+.msg .who { font-size: 11px; color: var(--muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: .04em; }
+.msg.user .body { background: var(--panel2); border-radius: 8px; padding: 8px 10px; }
+.msg.tool .body { color: #93c5fd; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+.msg.result .body { color: var(--green); }
+.msg.error .body { color: var(--red); }
+.msg.system .body { color: var(--muted); font-style: italic; }
+
+/* 승인 배너 */
+.perm { margin: 10px 14px; padding: 12px; border: 1px solid var(--amber); border-radius: 10px; background: #1c1606; }
+.perm .q { color: var(--amber); font-weight: 600; margin-bottom: 4px; }
+.perm .cmd { font-family: ui-monospace, Menlo, monospace; font-size: 13px; white-space: pre-wrap; word-break: break-word; margin-bottom: 10px; }
+.perm .btns { display: flex; gap: 10px; }
+.perm .btns button { flex: 1; }
+.perm .yes { background: var(--green); }
+.perm .no { background: var(--red); }
+
+/* 입력바 */
+.composer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel); }
+.composer textarea { resize: none; height: 44px; max-height: 140px; }
+.composer button { flex: none; }
+
+/* 상세 머리말의 '◀ 목록' 버튼은 폰에서만 보인다(데스크톱·전자종이에선 숨김) */
+.back-btn { display: none; }
+
+/* 폰 반응형 — 전자종이(큰 화면)는 위 데스크톱 레이아웃을 그대로 쓴다 */
+@media (max-width: 640px) {
+  /* 목록과 상세를 나란히 두지 않고 한 화면씩 전환(마스터-디테일) */
+  .list {
+    width: 100%;
+    border-right: none;
+  }
+  .detail { display: none; }            /* 기본: 목록만 보임 */
+  body.viewing .list { display: none; } /* 세션 선택 시: 상세만 보임 */
+  body.viewing .detail { display: flex; }
+  .back-btn { display: inline-block; }  /* 상세에서 목록으로 돌아가는 버튼 */
+
+  /* 좁은 폭에서 버튼이 넘치지 않게 줄바꿈 + 터치 영역 확보 */
+  .topbar { flex-wrap: wrap; }
+  .composer textarea { height: 52px; }
+}

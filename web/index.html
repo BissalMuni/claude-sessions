@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0e14" />
+    <title>claude-sessions</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <!-- 토큰 입력 게이트 -->
+    <div id="gate" class="gate">
+      <div class="gate-box">
+        <h1>claude-sessions</h1>
+        <p>서버 콘솔에 출력된 토큰을 입력하세요.</p>
+        <input id="token-input" type="text" inputmode="text" placeholder="토큰" autocomplete="off" />
+        <button id="token-btn">접속</button>
+        <div id="gate-err" class="err"></div>
+      </div>
+    </div>
+
+    <!-- 메인 -->
+    <div id="app" class="app hidden">
+      <header class="topbar">
+        <span id="conn" class="dot" title="연결 상태"></span>
+        <strong>세션</strong>
+        <button id="new-btn" class="ghost">+ 새 세션</button>
+        <button id="logout-btn" class="ghost">로그아웃</button>
+      </header>
+
+      <main class="layout">
+        <aside id="list" class="list"></aside>
+        <section id="detail" class="detail">
+          <div class="empty">세션을 선택하거나 새로 만드세요.</div>
+        </section>
+      </main>
+    </div>
+
+    <!-- 새 세션 모달 -->
+    <div id="modal" class="modal hidden">
+      <div class="modal-box">
+        <h2>새 세션</h2>
+        <label>작업 폴더 (cwd)</label>
+        <div class="picker">
+          <div id="picker-here" class="picker-here">/</div>
+          <div id="picker-list" class="picker-list"></div>
+        </div>
+        <input id="cwd-input" type="text" placeholder="폴더를 고르거나 직접 입력" autocomplete="off" />
+        <label>제목 (선택)</label>
+        <input id="title-input" type="text" placeholder="비우면 폴더명" autocomplete="off" />
+        <div class="modal-actions">
+          <button id="modal-cancel" class="ghost">취소</button>
+          <button id="modal-create">생성</button>
+        </div>
+        <div id="modal-err" class="err"></div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "name": "claude-sessions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "원격 멀티세션 Claude 컨트롤러 — 폰에서 여러 Claude Agent SDK 세션을 모니터링/승인/명령",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "probe": "tsx scripts/probe-sdk.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.161",
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
