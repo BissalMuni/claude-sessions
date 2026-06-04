@@ -6,6 +6,7 @@ export type SessionStatus =
   | 'idle' // 입력 대기 (사용자 턴)
   | 'thinking' // Claude 작업/응답 생성 중
   | 'awaiting_permission' // 도구 실행 직전, Yes/No 대기
+  | 'awaiting_question' // AskUserQuestion 선택 대기
   | 'done' // 턴 완료
   | 'error'; // 예외 발생
 
@@ -28,6 +29,21 @@ export interface PendingPermission {
   at: string;
 }
 
+/** AskUserQuestion 한 문항 (폰이 그릴 선택지) */
+export interface QuestionSpec {
+  question: string; // 질문 문장
+  header: string; // 짧은 라벨(칩)
+  multiSelect: boolean; // 복수 선택 허용 여부
+  options: { label: string; description: string }[];
+}
+
+/** 선택 대기 1건 (AskUserQuestion) */
+export interface PendingQuestion {
+  requestId: string;
+  questions: QuestionSpec[];
+  at: string;
+}
+
 /** 폰에 보내는 세션 스냅샷 (직렬화 가능) */
 export interface SessionView {
   id: string;
@@ -37,6 +53,7 @@ export interface SessionView {
   sdkSessionId: string | null; // SDK가 발급한 실제 세션 id (resume용)
   messages: StreamItem[];
   pending: PendingPermission | null;
+  question: PendingQuestion | null; // AskUserQuestion 선택 대기
   createdAt: string;
   updatedAt: string;
   error: string | null;

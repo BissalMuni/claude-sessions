@@ -63,6 +63,21 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ ok: true });
   });
 
+  // AskUserQuestion 선택 응답
+  router.post('/sessions/:id/answer', (req, res) => {
+    const { requestId, answers } = req.body ?? {};
+    if (typeof requestId !== 'string') {
+      return res.status(400).json({ error: 'requestId가 필요합니다' });
+    }
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+      return res.status(400).json({ error: 'answers(객체)가 필요합니다' });
+    }
+    if (!manager.answer(requestId, answers as Record<string, string>)) {
+      return res.status(409).json({ error: '대기 중인 질문이 아님(이미 처리/만료)' });
+    }
+    res.json({ ok: true });
+  });
+
   // 진행 중 턴 중단
   router.post('/sessions/:id/interrupt', async (req, res) => {
     if (!(await manager.interrupt(req.params.id))) {

@@ -79,7 +79,7 @@ function handleEvent(ev) {
 // ---------- 렌더 ----------
 const STATUS_KO = {
   starting: '시작중', idle: '대기', thinking: '작업중',
-  awaiting_permission: '승인대기', done: '완료', error: '오류',
+  awaiting_permission: '승인대기', awaiting_question: '질문대기', done: '완료', error: '오류',
 };
 
 function render() {
@@ -139,6 +139,7 @@ function renderDetail() {
       </div>
     </div>
     ${s.pending ? renderPerm(s) : ''}
+    ${s.question ? renderQuestion(s) : ''}
     <div class="log" id="log"></div>
     <div class="composer">
       <textarea id="prompt" placeholder="다음 명령을 입력…"></textarea>
@@ -180,6 +181,7 @@ function renderDetail() {
     $('perm-yes').onclick = () => decide(s, 'yes');
     $('perm-no').onclick = () => decide(s, 'no');
   }
+  if (s.question) wireQuestion(s);
 }
 
 function renderPerm(s) {
@@ -197,6 +199,57 @@ function renderPerm(s) {
 
 function decide(s, decision) {
   api('POST', `/sessions/${s.id}/approve`, { requestId: s.pending.requestId, decision }).catch(showErr);
+}
+
+// ---------- AskUserQuestion 선택지 ----------
+function renderQuestion(s) {
+  const blocks = s.question.questions.map((qq, qi) => {
+    const type = qq.multiSelect ? 'checkbox' : 'radio';
+    const opts = qq.options.map((o) => `
+      <label class="qopt">
+        <input type="${type}" name="q${qi}" value="${esc(o.label)}">
+        <span class="qopt-main">${esc(o.label)}</span>
+        ${o.description ? `<span class="qopt-desc">${esc(o.description)}</span>` : ''}
+      </label>`).join('');
+    return `
+      <div class="qblock" data-qi="${qi}" data-question="${esc(qq.question)}">
+        ${qq.header ? `<span class="qchip">${esc(qq.header)}</span>` : ''}
+        <div class="qtext">${esc(qq.question)}</div>
+        <div class="qopts">${opts}</div>
+        <input class="qother" type="text" placeholder="기타(직접 입력)…">
+      </div>`;
+  }).join('');
+  return `
+    <div class="question" id="question">
+      ${blocks}
+      <div class="qactions">
+        <button id="q-submit">선택 전송</button>
+        <button class="ghost" id="q-skip">건너뛰기</button>
+      </div>
+    </div>`;
+}
+
+function wireQuestion(s) {
+  const collect = () => {
+    const answers = {};
+    let missing = false;
+    document.querySelectorAll('#question .qblock').forEach((blk) => {
+      const checked = [...blk.querySelectorAll('input[name^="q"]:checked')].map((i) => i.value);
+      const other = blk.querySelector('.qother').value.trim();
+      const vals = other ? [...checked, other] : checked;
+      if (vals.length === 0) missing = true;
+      answers[blk.dataset.question] = vals.join(', ');
+    });
+    return missing ? null : answers;
+  };
+  $('q-submit').onclick = () => {
+    const answers = collect();
+    if (!answers) { alert('각 질문에 하나 이상 선택하거나 기타를 입력하세요.'); return; }
+    api('POST', `/sessions/${s.id}/answer`, { requestId: s.question.requestId, answers }).catch(showErr);
+  };
+  $('q-skip').onclick = () => {
+    api('POST', `/sessions/${s.id}/answer`, { requestId: s.question.requestId, answers: {} }).catch(showErr);
+  };
 }
 
 // ---------- 새 세션 모달 + 폴더 피커 ----------

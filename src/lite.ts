@@ -13,6 +13,7 @@ const STATUS_KO: Record<string, string> = {
   idle: '대기',
   thinking: '작업중',
   awaiting_permission: '승인대기',
+  awaiting_question: '질문대기',
   done: '완료',
   error: '오류',
 };
@@ -78,6 +79,28 @@ export function createLiteRouter(manager: SessionManager): Router {
     // 승인은 대시보드에서도 자주 누르므로, 온 곳(back)으로 돌려보낸다
     const back = String(req.body.back || '');
     res.redirect(back === 'dashboard' ? liteUrl('/lite', { token: TOKEN }) : liteUrl('/lite/session', { token: TOKEN, id }));
+  });
+
+  router.post('/answer', (req, res) => {
+    if (!authed(req)) return res.send(loginPage());
+    const id = String(req.body.id || '');
+    const requestId = String(req.body.requestId || '');
+    const view = manager.get(id);
+    const questions = view?.question?.questions ?? [];
+    const answers: Record<string, string> = {};
+    questions.forEach((q, qi) => {
+      const sel = req.body['a' + qi];
+      const picked = Array.isArray(sel)
+        ? sel.map(String)
+        : sel != null && sel !== ''
+          ? [String(sel)]
+          : [];
+      const other = String(req.body['o' + qi] || '').trim();
+      const vals = other ? [...picked, other] : picked;
+      answers[q.question] = vals.join(', ');
+    });
+    manager.answer(requestId, answers);
+    res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
   });
 
   router.post('/interrupt', (req, res) => {
@@ -159,7 +182,8 @@ ${rows}
 }
 
 function dashboardRow(s: SessionView, token: string): string {
-  const tag = `<span class="tag ${s.status === 'awaiting_permission' ? 'tag-await' : ''}">${STATUS_KO[s.status] || s.status}</span>`;
+  const awaiting = s.status === 'awaiting_permission' || s.status === 'awaiting_question';
+  const tag = `<span class="tag ${awaiting ? 'tag-await' : ''}">${STATUS_KO[s.status] || s.status}</span>`;
   let perm = '';
   if (s.pending) {
     // 대시보드에서 바로 승인/거부 (돌아가며 단계 파악 → 즉시 승인)
@@ -193,6 +217,8 @@ function detailPage(s: SessionView, token: string): string {
 </div>`
     : '';
 
+  const question = s.question ? questionForm(s, token) : '';
+
   const body = `<div class="bar">
   <h1>${esc(s.title)} <span class="tag">${STATUS_KO[s.status] || s.status}</span></h1>
   <a class="btn" href="${liteUrl('/lite/session', { token, id: s.id })}">↻ 새로고침</a>
@@ -200,6 +226,7 @@ function detailPage(s: SessionView, token: string): string {
 </div>
 <div class="muted">${esc(s.cwd)}</div>
 ${perm}
+${question}
 <h2>대화</h2>
 ${log}
 <hr>
@@ -285,6 +312,36 @@ function approveForm(id: string, requestId: string, token: string, back: string)
   <input type="hidden" name="back" value="${esc(back)}">
   <input type="hidden" name="decision" value="no">
   <button class="btn btn-big" type="submit">✘ 거부</button>
+</form>`;
+}
+
+function questionForm(s: SessionView, token: string): string {
+  const q = s.question!;
+  const blocks = q.questions
+    .map((qq, qi) => {
+      const type = qq.multiSelect ? 'checkbox' : 'radio';
+      const opts = qq.options
+        .map(
+          (o) =>
+            `<div><label><input type="${type}" name="a${qi}" value="${esc(o.label)}"> <b>${esc(o.label)}</b>${o.description ? ` — <span class="muted">${esc(o.description)}</span>` : ''}</label></div>`,
+        )
+        .join('');
+      return `<div class="row">
+  ${qq.header ? `<div><span class="tag">${esc(qq.header)}</span></div>` : ''}
+  <div><b>${esc(qq.question)}</b></div>
+  ${opts}
+  <p class="muted">기타(직접 입력)</p>
+  <input type="text" name="o${qi}" autocomplete="off">
+</div>`;
+    })
+    .join('');
+  return `<h2>질문에 답하기</h2>
+<form method="post" action="/lite/answer">
+  <input type="hidden" name="token" value="${esc(token)}">
+  <input type="hidden" name="id" value="${esc(s.id)}">
+  <input type="hidden" name="requestId" value="${esc(q.requestId)}">
+  ${blocks}
+  <p><button class="btn btn-big" type="submit">선택 전송</button></p>
 </form>`;
 }
 

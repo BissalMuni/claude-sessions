@@ -81,6 +81,7 @@ input, textarea {
 .badge.starting { background: #1e2636; color: var(--muted); }
 .badge.thinking { background: #1e293b; color: #93c5fd; }
 .badge.awaiting_permission { background: #3a2a08; color: var(--amber); }
+.badge.awaiting_question { background: #0c2a3a; color: #67e8f9; }
 .badge.done { background: #0f2a16; color: var(--green); }
 .badge.error { background: #3a1313; color: var(--red); }
 
@@ -105,6 +106,22 @@ input, textarea {
 .perm .btns button { flex: 1; }
 .perm .yes { background: var(--green); }
 .perm .no { background: var(--red); }
+
+/* AskUserQuestion 선택지 */
+.question { margin: 10px 14px; padding: 12px; border: 1px solid #155e75; border-radius: 10px; background: #0a1820; }
+.qblock { margin-bottom: 14px; }
+.qblock:last-of-type { margin-bottom: 0; }
+.qchip { display: inline-block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: #67e8f9; background: #0c2a3a; border-radius: 999px; padding: 2px 8px; margin-bottom: 6px; }
+.qtext { font-weight: 600; margin-bottom: 8px; }
+.qopts { display: flex; flex-direction: column; gap: 6px; }
+.qopt { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; align-items: baseline; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel2); cursor: pointer; }
+.qopt:has(input:checked) { border-color: #67e8f9; background: #0c2532; }
+.qopt input { width: auto; margin: 0; align-self: center; }
+.qopt-main { font-weight: 600; }
+.qopt-desc { grid-column: 2; color: var(--muted); font-size: 13px; }
+.qother { margin-top: 8px; }
+.qactions { display: flex; gap: 10px; margin-top: 12px; }
+.qactions #q-submit { flex: 1; background: #0891b2; }
 
 /* 입력바 */
 .composer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel); }

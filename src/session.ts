@@ -1,8 +1,15 @@
 import { query, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { AsyncQueue } from './asyncQueue.js';
 import { shortId } from './ids.js';
-import { registerPermission, rejectSessionPermissions } from './permissions.js';
-import type { PendingPermission, SessionStatus, SessionView, StreamItem } from './types.js';
+import { registerPermission, registerQuestion, rejectSessionPermissions } from './permissions.js';
+import type {
+  PendingPermission,
+  PendingQuestion,
+  QuestionSpec,
+  SessionStatus,
+  SessionView,
+  StreamItem,
+} from './types.js';
 
 const MAX_MESSAGES = 300; // 폰 메모리 보호: 최근 N개만 유지
 
@@ -25,6 +32,7 @@ export class Session {
   private sdkSessionId: string | null = null;
   private messages: StreamItem[] = [];
   private pending: PendingPermission | null = null;
+  private question: PendingQuestion | null = null;
   private error: string | null = null;
   private readonly createdAt = new Date().toISOString();
   private updatedAt = this.createdAt;
@@ -54,6 +62,27 @@ export class Session {
         permissionMode: 'default',
         // 도구 실행 직전 가로채기 → 폰으로 Yes/No 라우팅
         canUseTool: async (toolName, input, { signal, title }) => {
+          // AskUserQuestion: Yes/No 가 아니라 "선택지"를 폰에 띄우고 답을 모아
+          // updatedInput.answers 로 돌려준다. (SDK 가 의도한 권한-컴포넌트 경로)
+          if (toolName === 'AskUserQuestion') {
+            const questions = extractQuestions(input);
+            if (questions.length === 0) {
+              return { behavior: 'allow', updatedInput: input };
+            }
+            const qid = shortId('q');
+            this.question = { requestId: qid, questions, at: new Date().toISOString() };
+            this.addItem('tool', `질문: ${questions.map((q) => q.header || q.question).join(' / ')}`);
+            this.setStatus('awaiting_question');
+            const answers = await registerQuestion(qid, this.id, signal);
+            this.question = null;
+            this.setStatus('thinking');
+            // answers 가 null(중단/건너뜀)이면 빈 객체 → 도구는 "답 없음"으로 진행
+            return {
+              behavior: 'allow',
+              updatedInput: { ...(input as Record<string, unknown>), answers: answers ?? {} },
+            };
+          }
+
           const requestId = shortId('perm');
           this.pending = {
             requestId,
@@ -185,11 +214,36 @@ export class Session {
       sdkSessionId: this.sdkSessionId,
       messages: this.messages,
       pending: this.pending,
+      question: this.question,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
       error: this.error,
     };
   }
+}
+
+/** AskUserQuestion 입력에서 폰이 그릴 문항 목록을 뽑아낸다 */
+function extractQuestions(input: unknown): QuestionSpec[] {
+  const raw = (input as { questions?: unknown })?.questions;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((q): QuestionSpec => {
+    const obj = (q ?? {}) as Record<string, unknown>;
+    const options = Array.isArray(obj.options)
+      ? obj.options.map((o) => {
+          const oo = (o ?? {}) as Record<string, unknown>;
+          return {
+            label: String(oo.label ?? ''),
+            description: String(oo.description ?? ''),
+          };
+        })
+      : [];
+    return {
+      question: String(obj.question ?? ''),
+      header: String(obj.header ?? ''),
+      multiSelect: obj.multiSelect === true,
+      options,
+    };
+  });
 }
 
 /** 도구 입력을 사람이 읽을 한 줄 요약으로 */

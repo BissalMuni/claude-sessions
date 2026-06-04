@@ -1,7 +1,7 @@
 import { resolve as resolvePath } from 'node:path';
 import { Session } from './session.js';
 import { shortId } from './ids.js';
-import { resolvePermission, type Decision } from './permissions.js';
+import { resolvePermission, resolveQuestion, type Answers, type Decision } from './permissions.js';
 import type { ServerEvent, SessionView } from './types.js';
 
 /** 세션 풀을 관리하고 변경을 구독자(WebSocket)에게 알린다 */
@@ -45,6 +45,11 @@ export class SessionManager {
   /** 승인/거부 (폰 → canUseTool 대기 해소) */
   approve(requestId: string, decision: Decision): boolean {
     return resolvePermission(requestId, decision);
+  }
+
+  /** AskUserQuestion 선택 응답 (폰 → canUseTool 대기 해소) */
+  answer(requestId: string, answers: Answers): boolean {
+    return resolveQuestion(requestId, answers);
   }
 
   /** 진행 중인 턴 중단 */
