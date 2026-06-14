@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { browse } from './browse.js';
+import { browse, defaultStartPath } from './browse.js';
 import { TOKEN } from './auth.js';
 import type { SessionManager } from './sessionManager.js';
 import type { SessionView } from './types.js';
@@ -17,6 +17,25 @@ const STATUS_KO: Record<string, string> = {
   done: '완료',
   error: '오류',
 };
+
+// 중요도(스티커) 우선순위: 내 조치가 필요한 세션일수록 위로 올라온다.
+const STATUS_RANK: Record<string, number> = {
+  awaiting_permission: 0, // 승인대기 — 나를 기다림
+  awaiting_question: 1, // 질문대기 — 나를 기다림
+  error: 2, // 오류
+  done: 3, // 완료(답변 떴다)
+  idle: 4, // 대기(내 턴)
+  thinking: 5, // 작업중 — 조치 불필요
+  starting: 6, // 시작중
+};
+// 정렬: 상태 중요도 → 정체 의심(위로) → 생성순.
+function byImportance(a: SessionView, b: SessionView): number {
+  const ra = STATUS_RANK[a.status] ?? 99;
+  const rb = STATUS_RANK[b.status] ?? 99;
+  if (ra !== rb) return ra - rb;
+  if (!!a.stalled !== !!b.stalled) return a.stalled ? -1 : 1;
+  return a.createdAt.localeCompare(b.createdAt);
+}
 
 export function createLiteRouter(manager: SessionManager): Router {
   const router = Router();
@@ -39,15 +58,22 @@ export function createLiteRouter(manager: SessionManager): Router {
   // 세션 상세
   router.get('/session', (req, res) => {
     if (!authed(req)) return res.send(loginPage());
-    const view = manager.get(String(req.query.id || ''));
+    const id = String(req.query.id || '');
+    const view = manager.get(id);
     if (!view) return res.send(notFoundPage(TOKEN));
-    res.send(detailPage(view, TOKEN));
+    // 대시보드와 같은 중요도순으로 정렬해 '다음' 세션(프로젝트) id 를 계산.
+    // 맨 끝에서는 처음으로 순환(wrap-around) → '다음'은 항상 다음 프로젝트 상세로 바로 연결된다.
+    const ordered = [...manager.list()].sort(byImportance);
+    const idx = ordered.findIndex((x) => x.id === id);
+    const nextId = idx >= 0 && ordered.length > 1 ? ordered[(idx + 1) % ordered.length].id : null;
+    res.send(detailPage(view, TOKEN, nextId));
   });
 
   // 폴더 피커 (새 세션)
   router.get('/new', (req, res) => {
     if (!authed(req)) return res.send(loginPage());
-    const path = typeof req.query.path === 'string' ? req.query.path : '';
+    // 쿼리에 path 가 있으면 그걸로(빈 문자열='상위로 → 드라이브 목록'도 존중), 없으면 기본 시작 폴더
+    const path = typeof req.query.path === 'string' ? req.query.path : defaultStartPath();
     res.send(pickerPage(browse(path), TOKEN));
   });
 
@@ -121,8 +147,16 @@ export function createLiteRouter(manager: SessionManager): Router {
 
 // ---------- HTML 빌더 (옛 브라우저 호환) ----------
 
-function page(title: string, body: string, opts?: { refresh?: number }): string {
+function page(
+  title: string,
+  body: string,
+  opts?: { refresh?: number; scrollBottom?: boolean },
+): string {
   const refresh = opts?.refresh ? `<meta http-equiv="refresh" content="${opts.refresh}">` : '';
+  // 로드되면 곧바로 화면 하단(최근 메시지 + 입력창)이 보이도록 스크롤
+  const scrollScript = opts?.scrollBottom
+    ? `<script>function _b(){window.scrollTo(0,document.body.scrollHeight);}window.onload=_b;setTimeout(_b,0);setTimeout(_b,200);</script>`
+    : '';
   // 인라인 CSS, flexbox/grid 없이 블록·테이블만. 고대비(흑/백) + 큰 글씨.
   return `<!DOCTYPE html>
 <html><head>
@@ -131,27 +165,41 @@ function page(title: string, body: string, opts?: { refresh?: number }): string 
 ${refresh}
 <title>${esc(title)}</title>
 <style>
-body{background:#fff;color:#000;font-family:sans-serif;font-size:18px;line-height:1.5;margin:0;padding:12px;}
+body{background:#fff;color:#000;font-family:sans-serif;font-size:27px;line-height:1.5;margin:0;padding:12px;}
 a{color:#000;}
-h1{font-size:22px;margin:6px 0 12px;}
-h2{font-size:19px;margin:14px 0 6px;}
-.bar{border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px;}
-.btn{display:inline-block;border:2px solid #000;background:#fff;color:#000;padding:8px 14px;margin:2px 4px 2px 0;text-decoration:none;font-size:18px;}
-.btn-big{padding:14px 18px;font-size:20px;font-weight:bold;}
+h1{font-size:33px;margin:6px 0 12px;}
+h2{font-size:29px;margin:14px 0 6px;}
+.bar{border-bottom:2px solid #000;padding:8px 0;margin:0 0 12px;position:sticky;top:0;background:#fff;z-index:5;}
+.dock{position:sticky;bottom:0;background:#fff;border-top:2px solid #000;padding:8px 0 4px;margin-top:12px;z-index:5;}
+.dock textarea{height:60px;}
+.dock h2{margin:0 0 6px;}
+.dock-title{font-weight:bold;font-size:24px;margin:0 0 6px;}
+.btn{display:inline-block;-webkit-appearance:none;appearance:none;border:2px solid #000;border-radius:0;background:#fff;color:#000;padding:8px 14px;margin:2px 4px 2px 0;text-decoration:none;font-size:27px;font-family:inherit;line-height:1.2;vertical-align:middle;cursor:pointer;}
+.btn-big{padding:14px 18px;font-size:30px;font-weight:bold;}
+.ctrls{line-height:1.9;}
+.ctrls .btn{margin:0 6px 6px 0;vertical-align:middle;}
+.ctrls form{display:inline;margin:0;}
+/* 구형 e-ink 브라우저용: flexbox 없이 table 한 행으로 버튼을 한 줄에 강제 배치.
+   박스(테두리)는 <td>가 그리므로 <a>/<button> 구분 없이 동일하게 보인다. */
+.btnrow{width:100%;border-collapse:collapse;table-layout:fixed;margin:4px 0;}
+.btnrow td{border:2px solid #000;padding:0;text-align:center;}
+.btnrow td form{display:block;margin:0;}
+.btnrow td .btn{display:block;width:100%;box-sizing:border-box;margin:0;border:0;border-radius:0;background:#fff;color:#000;padding:14px 4px;font-size:27px;line-height:1.2;white-space:nowrap;overflow:hidden;}
 .row{border:2px solid #000;padding:10px;margin-bottom:10px;}
-.muted{color:#444;font-size:15px;}
-.tag{border:1px solid #000;padding:1px 8px;font-size:14px;}
+.muted{color:#444;font-size:23px;}
+.tag{border:1px solid #000;padding:1px 8px;font-size:21px;}
 .tag-await{background:#000;color:#fff;}
-.cmd{font-family:monospace;font-size:16px;border:1px dashed #000;padding:6px;margin:6px 0;word-break:break-all;white-space:pre-wrap;}
+.tag-work{border:2px solid #000;font-weight:bold;}
+.cmd{font-family:monospace;font-size:24px;border:1px dashed #000;padding:6px;margin:6px 0;word-break:break-all;white-space:pre-wrap;}
 .msg{border-bottom:1px solid #ccc;padding:6px 0;white-space:pre-wrap;word-break:break-word;}
-.who{font-size:13px;color:#555;}
-input[type=text],textarea{width:100%;font-size:18px;padding:8px;border:2px solid #000;box-sizing:border-box;}
+.who{font-size:20px;color:#555;}
+input[type=text],textarea{width:100%;font-size:27px;padding:8px;border:2px solid #000;box-sizing:border-box;}
 textarea{height:80px;}
 form{margin:0;}
 .inline{display:inline;}
 hr{border:none;border-top:1px solid #ccc;margin:12px 0;}
 </style>
-</head><body>${body}</body></html>`;
+</head><body>${body}${scrollScript}</body></html>`;
 }
 
 function loginPage(): string {
@@ -167,23 +215,31 @@ function loginPage(): string {
 }
 
 function dashboardPage(sessions: SessionView[], token: string): string {
-  const sorted = [...sessions].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const sorted = [...sessions].sort(byImportance);
   const rows = sorted.length
     ? sorted.map((s) => dashboardRow(s, token)).join('')
     : '<p class="muted">아직 세션이 없습니다.</p>';
   const body = `<div class="bar">
   <h1>세션 (${sorted.length})</h1>
-  <a class="btn" href="${liteUrl('/lite/new', { token })}">+ 새 세션</a>
-  <a class="btn" href="${liteUrl('/lite', { token })}">↻ 새로고침</a>
 </div>
 ${rows}
-<p class="muted">이 화면은 5초마다 자동 새로고침됩니다.</p>`;
-  return page('세션 목록', body, { refresh: 5 });
+<p class="muted">이 화면은 15초마다 자동 새로고침됩니다.</p>
+<div class="dock">
+  <p class="ctrls">
+    <a class="btn" href="${liteUrl('/lite', { token })}">↻ 새로고침</a>
+    <a class="btn btn-big" href="${liteUrl('/lite/new', { token })}">+ 새 세션</a>
+  </p>
+</div>`;
+  return page('세션 목록', body, { refresh: 15 });
 }
 
 function dashboardRow(s: SessionView, token: string): string {
   const awaiting = s.status === 'awaiting_permission' || s.status === 'awaiting_question';
-  const tag = `<span class="tag ${awaiting ? 'tag-await' : ''}">${STATUS_KO[s.status] || s.status}</span>`;
+  const working = s.status === 'thinking';
+  const tagClass = awaiting ? 'tag-await' : working ? 'tag-work' : '';
+  const base = working ? '⏳ 클로드 응답 대기중' : STATUS_KO[s.status] || s.status;
+  const label = s.stalled ? base + ' ⚠정체?' : base;
+  const tag = `<span class="tag ${tagClass}">${label}</span>`;
   let perm = '';
   if (s.pending) {
     // 대시보드에서 바로 승인/거부 (돌아가며 단계 파악 → 즉시 승인)
@@ -197,7 +253,7 @@ ${approveForm(s.id, s.pending.requestId, token, 'dashboard')}`;
 </div>`;
 }
 
-function detailPage(s: SessionView, token: string): string {
+function detailPage(s: SessionView, token: string, nextId?: string | null): string {
   const msgs = s.messages.slice(-40);
   const log = msgs.length
     ? msgs
@@ -221,34 +277,36 @@ function detailPage(s: SessionView, token: string): string {
 
   const body = `<div class="bar">
   <h1>${esc(s.title)} <span class="tag">${STATUS_KO[s.status] || s.status}</span></h1>
-  <a class="btn" href="${liteUrl('/lite/session', { token, id: s.id })}">↻ 새로고침</a>
-  <a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>
+  <p class="ctrls">
+    <a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>
+    <a class="btn" href="${liteUrl('/lite/session', { token, id: s.id })}">↻ 새로고침</a>
+  </p>
 </div>
 <div class="muted">${esc(s.cwd)}</div>
-${perm}
-${question}
 <h2>대화</h2>
 ${log}
-<hr>
-<h2>명령 보내기</h2>
-<form method="post" action="/lite/prompt">
-  <input type="hidden" name="token" value="${esc(token)}">
-  <input type="hidden" name="id" value="${esc(s.id)}">
-  <textarea name="text" placeholder="다음 명령을 입력…"></textarea>
-  <p><button class="btn btn-big" type="submit">전송</button></p>
-</form>
-<hr>
-<form method="post" action="/lite/interrupt" class="inline">
-  <input type="hidden" name="token" value="${esc(token)}">
-  <input type="hidden" name="id" value="${esc(s.id)}">
-  <button class="btn" type="submit">진행 중단</button>
-</form>
-<form method="post" action="/lite/remove" class="inline">
-  <input type="hidden" name="token" value="${esc(token)}">
-  <input type="hidden" name="id" value="${esc(s.id)}">
-  <button class="btn" type="submit">세션 종료</button>
-</form>`;
-  return page(s.title, body);
+<div class="dock">
+  ${btnRow([
+    `<button class="btn" type="submit" form="promptForm">전송</button>`,
+    `<a class="btn" href="${liteUrl('/lite/session', { token, id: s.id })}">↻ 새로고침</a>`,
+    `<a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>`,
+    `<form method="post" action="/lite/interrupt"><input type="hidden" name="token" value="${esc(token)}"><input type="hidden" name="id" value="${esc(s.id)}"><button class="btn" type="submit">중단</button></form>`,
+    `<form method="post" action="/lite/remove"><input type="hidden" name="token" value="${esc(token)}"><input type="hidden" name="id" value="${esc(s.id)}"><button class="btn" type="submit">종료</button></form>`,
+    // 종료 다음: 다음 세션(프로젝트)으로 이동. 다음이 없으면 목록으로 돌아간다.
+    nextId
+      ? `<a class="btn" href="${liteUrl('/lite/session', { token, id: nextId })}">다음 ▶</a>`
+      : `<a class="btn" href="${liteUrl('/lite', { token })}">다음 ▶</a>`,
+  ])}
+  <div class="dock-title">${esc(s.title)} <span class="tag">${STATUS_KO[s.status] || s.status}</span></div>
+  ${perm}
+  ${question}
+  <form id="promptForm" method="post" action="/lite/prompt">
+    <input type="hidden" name="token" value="${esc(token)}">
+    <input type="hidden" name="id" value="${esc(s.id)}">
+    <textarea name="text" placeholder="다음 명령을 입력…"></textarea>
+  </form>
+</div>`;
+  return page(s.title, body, { scrollBottom: true });
 }
 
 function pickerPage(b: ReturnType<typeof browse>, token: string): string {
@@ -284,14 +342,18 @@ function pickerPage(b: ReturnType<typeof browse>, token: string): string {
 
   const body = `<div class="bar">
   <h1>폴더 선택</h1>
-  <a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>
 </div>
 <p class="muted">현재: ${here}</p>
-${up}
 ${createForm}
 <h2>하위 폴더</h2>
 ${err}
-${drivesOrDirs}`;
+${drivesOrDirs}
+<div class="dock">
+  <p class="ctrls">
+    ${up}
+    <a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>
+  </p>
+</div>`;
   return page('폴더 선택', body);
 }
 
@@ -353,6 +415,12 @@ function messagePage(msg: string, token: string): string {
 }
 
 // ---------- 유틸 ----------
+
+// 버튼들을 table 한 행으로 묶어 구형 브라우저에서도 무조건 한 줄에 배치한다.
+// (각 셀이 테두리를 그리므로 <a>/<button> 구분 없이 동일한 박스로 보인다)
+function btnRow(cells: string[]): string {
+  return `<table class="btnrow"><tr>${cells.map((c) => `<td>${c}</td>`).join('')}</tr></table>`;
+}
 
 function liteUrl(path: string, params: Record<string, string>): string {
   const q = Object.entries(params)

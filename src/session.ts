@@ -1,8 +1,12 @@
 import { query, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AsyncQueue } from './asyncQueue.js';
 import { shortId } from './ids.js';
 import { registerPermission, registerQuestion, rejectSessionPermissions } from './permissions.js';
 import type {
+  InputImage,
   PendingPermission,
   PendingQuestion,
   QuestionSpec,
@@ -12,6 +16,16 @@ import type {
 } from './types.js';
 
 const MAX_MESSAGES = 300; // 폰 메모리 보호: 최근 N개만 유지
+
+// 이 시간(ms)보다 오래 SDK 가 무응답이면 '정체?'로 표시한다. 끊지 않는다 — 보여주기만.
+const STALL_HINT_MS = Number(process.env.STALL_HINT_MS) || 90_000;
+// SDK 서브프로세스 stderr/디버그 로그를 세션별로 남길 디렉터리
+const LOG_DIR = join(process.cwd(), 'logs');
+
+// 로컬 스킬 플러그인(절대경로). src/ 든 dist/ 든 항상 설치 루트의 skills-plugin/ 을
+// 가리킨다. 세션 cwd 와 무관하게 모든 세션에 같은 스킬 묶음을 주입하기 위함.
+// (skills-plugin/skills 는 ~/.claude/skills 로의 junction)
+const SKILLS_PLUGIN_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'skills-plugin');
 
 export interface SessionOpts {
   id: string;
@@ -37,6 +51,12 @@ export class Session {
   private readonly createdAt = new Date().toISOString();
   private updatedAt = this.createdAt;
 
+  // stall 감지: SDK 로부터 마지막으로 무언가 받은(혹은 입력을 주입한) 시각.
+  private lastActivityAt = Date.now();
+  private stalled = false;
+  // broadcast 를 read loop 밖으로 빼기 위한 coalescing 플래그.
+  private emitScheduled = false;
+
   private inputQueue = new AsyncQueue<SDKUserMessage>();
   private abort = new AbortController();
   private run: Query | null = null;
@@ -60,6 +80,15 @@ export class Session {
         // canUseTool(=폰)로 강제된다. (전역 allowlist 가 게이트를 우회하는 것 방지)
         settingSources: ['project'],
         permissionMode: 'default',
+        // 로컬 스킬 플러그인 주입 + 전부 활성화. settingSources 와 무관하게 로드되므로
+        // 전역 allowlist 는 끌어오지 않는다 → 폰 승인 게이트(canUseTool) 그대로 유지.
+        // 스킬이 부르는 도구도 여전히 canUseTool 을 거쳐 폰 승인을 받는다.
+        plugins: [{ type: 'local', path: SKILLS_PLUGIN_DIR }],
+        skills: 'all',
+        // SDK 서브프로세스의 stderr/디버그 로그를 파일로 캡처한다.
+        // stall 이 다시 나면 'SDK 쪽 관점'에서 진단할 유일한 창구. (현재는 버려지고 있었음)
+        stderr: (data: string) => this.logStderr(data),
+        debug: process.env.SDK_DEBUG === '1',
         // 도구 실행 직전 가로채기 → 폰으로 Yes/No 라우팅
         canUseTool: async (toolName, input, { signal, title }) => {
           // AskUserQuestion: Yes/No 가 아니라 "선택지"를 폰에 띄우고 답을 모아
@@ -113,6 +142,7 @@ export class Session {
   private async consume(): Promise<void> {
     try {
       for await (const msg of this.run!) {
+        if (process.env.DEBUG_BLOCKS) this.debugDump(msg);
         this.handleMessage(msg);
       }
     } catch (err) {
@@ -123,6 +153,7 @@ export class Session {
   }
 
   private handleMessage(msg: SDKMessage): void {
+    this.markActivity(); // SDK 가 살아있다는 신호 → stall 시계 리셋
     switch (msg.type) {
       case 'system':
         if (msg.subtype === 'init') {
@@ -145,8 +176,11 @@ export class Session {
       }
 
       case 'result': {
-        const text = msg.subtype === 'success' ? msg.result : `(${msg.subtype})`;
-        this.addItem('result', text || '(완료)');
+        // 성공 시 result 는 마지막 assistant 텍스트와 동일 → 중복이라 로그에 안 남긴다.
+        // 비정상 종료(에러/턴 한도 등)만 종료 사유로 표시한다.
+        if (msg.subtype !== 'success') {
+          this.addItem('result', `(${msg.subtype})`);
+        }
         this.setStatus('idle'); // 턴 완료 → 다음 입력 대기
         break;
       }
@@ -156,15 +190,51 @@ export class Session {
     }
   }
 
-  /** 폰이 보낸 새 명령을 세션에 주입 */
-  sendPrompt(text: string): void {
+  /** DEBUG_BLOCKS 일 때만: SDK 메시지의 타입/블록을 콘솔에 덤프 (서버측 도구 추적) */
+  private debugDump(msg: SDKMessage): void {
+    const m = msg as Record<string, any>;
+    if (m.type === 'assistant') {
+      const blocks = (m.message?.content ?? []) as Array<Record<string, any>>;
+      for (const b of blocks) {
+        const extra = b.name ? ` name=${b.name}` : b.type === 'text' ? ` "${String(b.text).slice(0, 80)}"` : '';
+        console.log(`[blocks] assistant block: ${b.type}${extra}`);
+      }
+    } else if (m.type === 'user') {
+      const blocks = (m.message?.content ?? []) as Array<Record<string, any>>;
+      const types = Array.isArray(blocks) ? blocks.map((b) => b.type).join(',') : typeof blocks;
+      console.log(`[blocks] user message (tool_result?): ${types}`);
+    } else if (m.type === 'result') {
+      console.log(`[blocks] result subtype=${m.subtype} usage=${JSON.stringify(m.usage?.server_tool_use ?? {})}`);
+    } else {
+      console.log(`[blocks] ${m.type}${m.subtype ? '/' + m.subtype : ''}`);
+    }
+  }
+
+  /** 폰이 보낸 새 명령을 세션에 주입 (텍스트 + 선택적 이미지) */
+  sendPrompt(text: string, images: InputImage[] = []): void {
     if (this.status === 'error') return;
-    this.addItem('user', text);
+    const suffix = images.length ? ` [🖼 이미지 ${images.length}장]` : '';
+    this.addItem('user', (text || '(이미지)') + suffix);
+
+    // 이미지가 있으면 content 를 블록 배열로, 없으면 기존처럼 문자열로
+    const content = images.length
+      ? [
+          ...(text ? [{ type: 'text', text }] : []),
+          ...images.map((img) => ({
+            type: 'image',
+            source: { type: 'base64', media_type: img.mediaType, data: img.data },
+          })),
+        ]
+      : text;
+
     this.inputQueue.push({
       type: 'user',
-      message: { role: 'user', content: text },
+      // SDK 는 Anthropic content block 배열을 그대로 받는다 (타입만 우회)
+      message: { role: 'user', content: content as never },
       parent_tool_use_id: null,
     });
+    this.lastActivityAt = Date.now(); // SDK 응답을 기다리기 시작 → stall 시계 시작
+    this.stalled = false;
     this.setStatus('thinking');
   }
 
@@ -201,7 +271,55 @@ export class Session {
 
   private touch(): void {
     this.updatedAt = new Date().toISOString();
-    this.onUpdate(this.view());
+    this.scheduleEmit();
+  }
+
+  // 핵심 수정: broadcast(=view 전체 직렬화 + WS 전송)를 read loop 의 동기 경로에서 빼낸다.
+  // 예전엔 SDK 메시지 하나마다 동기로 JSON.stringify(전체) → 전송을 하느라 파이프를
+  // 늦게 비웠고, 큰 tool_result(긴 파일)가 OS 파이프 버퍼를 채우면 서브프로세스가
+  // write 에서 막혀 stall 됐다. setImmediate 로 미뤄 한 tick 의 변경들을 1번으로 합치고,
+  // 루프는 즉시 다음 메시지를 읽어 파이프를 비운다.
+  private scheduleEmit(): void {
+    if (this.emitScheduled) return;
+    this.emitScheduled = true;
+    setImmediate(() => {
+      this.emitScheduled = false;
+      this.onUpdate(this.view());
+    });
+  }
+
+  /** SDK 가 살아있다는 신호. stall 시계를 리셋하고, 정체 표시였다면 즉시 해제. */
+  private markActivity(): void {
+    this.lastActivityAt = Date.now();
+    if (this.stalled) {
+      this.stalled = false;
+      this.touch();
+    }
+  }
+
+  /** SDK 가 응답 중이어야 할 상태인데 너무 오래 조용한가? (중단이 아니라 표시용) */
+  private isStalled(): boolean {
+    if (this.status !== 'thinking' && this.status !== 'starting') return false;
+    return Date.now() - this.lastActivityAt > STALL_HINT_MS;
+  }
+
+  /** SessionManager 의 주기 sweeper 가 호출. 정체 상태가 바뀌었으면 폰에 알린다. */
+  checkStall(): void {
+    const now = this.isStalled();
+    if (now !== this.stalled) {
+      this.stalled = now;
+      this.touch();
+    }
+  }
+
+  /** SDK 서브프로세스 stderr/디버그 출력을 세션별 파일에 적재. 실패는 무시. */
+  private logStderr(data: string): void {
+    try {
+      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+      appendFileSync(join(LOG_DIR, `${this.id}.log`), data);
+    } catch {
+      /* 로깅 실패가 세션을 죽이면 안 된다 */
+    }
   }
 
   /** 직렬화 가능한 스냅샷 */
@@ -218,6 +336,7 @@ export class Session {
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
       error: this.error,
+      stalled: this.isStalled(),
     };
   }
 }

@@ -40,6 +40,8 @@ input, textarea {
   background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
   padding: 22px; width: 100%; max-width: 380px;
 }
+/* 새 세션 모달(폴더 피커)은 로그인 게이트보다 넓게. 화면을 넘치면 모달이 스크롤 */
+.modal-box { max-width: 620px; max-height: 90vh; overflow-y: auto; }
 .gate-box h1, .modal-box h2 { margin: 0 0 10px; }
 .gate-box p { color: var(--muted); margin: 0 0 14px; }
 .gate-box input, .modal-box input { margin-bottom: 12px; }
@@ -50,11 +52,30 @@ input, textarea {
 /* 폴더 피커 */
 .picker { border: 1px solid var(--line); border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
 .picker-here { padding: 7px 10px; font-size: 12px; color: var(--muted); background: var(--panel2); border-bottom: 1px solid var(--line); word-break: break-all; }
-.picker-list { max-height: 200px; overflow-y: auto; }
+.picker-list { max-height: 50vh; min-height: 220px; overflow-y: auto; }
 .picker-row { padding: 9px 10px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
 .picker-row:last-child { border-bottom: none; }
 .picker-row:active { background: var(--panel2); }
 .picker-row.up { color: var(--muted); }
+
+/* 다중 선택 가능한 폴더 행: 체크박스 + 폴더명 */
+.picker-row.pick { display: flex; align-items: center; gap: 8px; padding: 0; }
+.picker-row.pick.sel { background: rgba(59,130,246,.14); }
+.pick-check {
+  flex: 0 0 auto; background: transparent; color: var(--muted);
+  padding: 9px 4px 9px 10px; font-size: 16px; line-height: 1; border-radius: 0;
+}
+.picker-row.pick.sel .pick-check { color: var(--accent); }
+.pick-name { flex: 1 1 auto; padding: 9px 10px 9px 0; word-break: break-all; }
+.freq { color: var(--amber); font-size: 12px; }
+
+/* 선택한 폴더 막대 (일괄 생성 대상) */
+.picker-sel { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--panel2); }
+.sel-head { display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.sel-head button { padding: 4px 9px; }
+.sel-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.selchip { display: inline-flex; align-items: center; gap: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 4px 6px 4px 10px; font-size: 13px; }
+.selchip-x { background: transparent; color: var(--muted); padding: 0 4px; font-size: 15px; line-height: 1; border-radius: 999px; }
 
 /* 레이아웃 */
 .app { display: flex; flex-direction: column; height: 100%; }
@@ -84,11 +105,38 @@ input, textarea {
 .badge.awaiting_question { background: #0c2a3a; color: #67e8f9; }
 .badge.done { background: #0f2a16; color: var(--green); }
 .badge.error { background: #3a1313; color: var(--red); }
+/* 정체?: SDK 가 오래 무응답 — 죽음(error)은 아니지만 멈춰보임을 경고색으로 표시 */
+.badge.stalled { background: #3a2a08; color: var(--amber); animation: stalledPulse 1.4s ease-in-out infinite; }
+@keyframes stalledPulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 
 /* 상세 */
 .detail-head { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--panel); }
 .detail-head .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .detail-head .actions { margin-left: auto; display: flex; gap: 8px; }
+.detail-head .actions .nav { padding: 5px 8px; font-size: 12px; line-height: 1; display: inline-flex; align-items: center; gap: 4px; }
+.detail-head .actions .nav:disabled { opacity: .35; cursor: default; }
+.notice-count { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px; background: rgba(0,0,0,.4); color: #fff; font-size: 10px; font-weight: 700; line-height: 15px; text-align: center; }
+
+/* 알림(종) 버튼: 시계바늘 궤도처럼 색이 도는 그라데이션 배경 */
+@property --bell-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+#d-notice {
+  border-color: transparent;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0,0,0,.45);
+  background: conic-gradient(from var(--bell-angle) at 50% 50%,
+    #3b82f6, #22c55e, #f59e0b, #ef4444, #8b5cf6, #06b6d4, #3b82f6);
+  animation: bellOrbit 4s linear infinite; /* 시계바늘처럼 한 바퀴(빠르게) */
+}
+@keyframes bellOrbit { to { --bell-angle: 360deg; } }
+#d-notice:disabled { animation: none; background: transparent; border-color: var(--line); color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { #d-notice { animation: none; } }
+.nav:disabled .notice-count { background: #3a4256; }
+/* 새 알림 도착 시 2초간 깜빡(그라데이션 회전은 유지). 클래스가 2초 뒤 제거되며 멈춤 */
+.nav.flash { animation: bellOrbit 4s linear infinite, noticeFlash .5s ease-in-out infinite; }
+@keyframes noticeFlash {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; filter: brightness(1); }
+  50%      { box-shadow: 0 0 0 3px var(--accent); filter: brightness(1.8); }
+}
 .log { flex: 1; overflow-y: auto; padding: 12px 14px; }
 .msg { margin-bottom: 12px; white-space: pre-wrap; word-break: break-word; }
 .msg .who { font-size: 11px; color: var(--muted); margin-bottom: 2px; text-transform: uppercase; letter-spacing: .04em; }
@@ -98,6 +146,18 @@ input, textarea {
 .msg.error .body { color: var(--red); }
 .msg.system .body { color: var(--muted); font-style: italic; }
 
+/* 본문 마크다운 표 — pre-wrap 영향 안 받게 normal 로 되돌림 */
+.msg .body table.md {
+  border-collapse: collapse; margin: 8px 0; width: 100%;
+  white-space: normal; font-size: 13px; display: block; overflow-x: auto;
+}
+.msg .body table.md th, .msg .body table.md td {
+  border: 1px solid var(--line); padding: 6px 9px; text-align: left; vertical-align: top;
+}
+.msg .body table.md thead th { background: var(--panel2); font-weight: 700; }
+.msg .body table.md tbody tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+.msg .body code { background: var(--panel2); border-radius: 4px; padding: 1px 5px; font-family: ui-monospace, Menlo, monospace; font-size: .92em; }
+
 /* 승인 배너 */
 .perm { margin: 10px 14px; padding: 12px; border: 1px solid var(--amber); border-radius: 10px; background: #1c1606; }
 .perm .q { color: var(--amber); font-weight: 600; margin-bottom: 4px; }
@@ -106,6 +166,14 @@ input, textarea {
 .perm .btns button { flex: 1; }
 .perm .yes { background: var(--green); }
 .perm .no { background: var(--red); }
+
+/* 목록 화면 인라인 승인 (lite 대시보드와 동일한 동선) */
+.list-perm { margin-top: 8px; padding: 8px; border: 1px solid var(--amber); border-radius: 8px; background: #1c1606; }
+.list-perm .cmd { font-family: ui-monospace, Menlo, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; margin-bottom: 8px; }
+.list-perm .btns { display: flex; gap: 8px; }
+.list-perm .btns button { flex: 1; }
+.list-perm .yes { background: var(--green); }
+.list-perm .no { background: var(--red); }
 
 /* AskUserQuestion 선택지 */
 .question { margin: 10px 14px; padding: 12px; border: 1px solid #155e75; border-radius: 10px; background: #0a1820; }
@@ -124,9 +192,38 @@ input, textarea {
 .qactions #q-submit { flex: 1; background: #0891b2; }
 
 /* 입력바 */
-.composer { display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel); }
+.composer { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel); }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer textarea { resize: none; height: 44px; max-height: 140px; }
 .composer button { flex: none; }
+.attach-btn { height: 44px; font-size: 18px; line-height: 1; padding: 0 12px; }
+
+/* 첨부 이미지 미리보기 */
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumbs:empty { display: none; }
+.thumb { position: relative; width: 56px; height: 56px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-x {
+  position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; padding: 0;
+  border-radius: 50%; background: rgba(0,0,0,.6); color: #fff; border: none;
+  font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
+}
+
+/* 첨부 파일 칩 (디스크 저장 대기) */
+.files { display: flex; flex-wrap: wrap; gap: 6px; }
+.files:empty { display: none; }
+.filechip {
+  display: flex; align-items: center; gap: 8px; max-width: 100%;
+  padding: 4px 4px 4px 9px; border-radius: 8px; border: 1px solid var(--line); background: #1e2636;
+  font-size: 12px;
+}
+.filechip .fc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+.filechip .fc-size { color: var(--muted); flex: none; }
+.filechip .fc-x {
+  flex: none; width: 20px; height: 20px; padding: 0; border: none; border-radius: 50%;
+  background: rgba(255,255,255,.08); color: #fff; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
 
 /* 상세 머리말의 '◀ 목록' 버튼은 폰에서만 보인다(데스크톱·전자종이에선 숨김) */
 .back-btn { display: none; }

@@ -24,6 +24,7 @@
       <header class="topbar">
         <span id="conn" class="dot" title="연결 상태"></span>
         <strong>세션</strong>
+        <button id="list-btn" class="ghost">◀ 목록</button>
         <button id="new-btn" class="ghost">+ 새 세션</button>
         <button id="logout-btn" class="ghost">로그아웃</button>
       </header>
@@ -45,6 +46,7 @@
           <div id="picker-here" class="picker-here">/</div>
           <div id="picker-list" class="picker-list"></div>
         </div>
+        <div id="picker-sel" class="picker-sel hidden"></div>
         <input id="cwd-input" type="text" placeholder="폴더를 고르거나 직접 입력" autocomplete="off" />
         <label>제목 (선택)</label>
         <input id="title-input" type="text" placeholder="비우면 폴더명" autocomplete="off" />

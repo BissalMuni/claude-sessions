@@ -9,6 +9,16 @@ build/
 *.log
 server.err.log
 server.out.log
+logs/
+
+# 폰에서 업로드한 파일 (세션 작업폴더에 저장됨)
+.uploads/
+
+# 서버 영속 데이터 (폴더 사용 빈도 등)
+.data/
+
+# 로컬 스킬 플러그인의 skills/ 는 ~/.claude/skills 로의 junction (기기별)
+skills-plugin/skills/
 
 # Env / secrets
 .env

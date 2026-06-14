@@ -1,7 +1,44 @@
 import { Router } from 'express';
 import { requireToken } from './auth.js';
 import { browse } from './browse.js';
+import { saveUploads } from './uploads.js';
+import { getFolderFreq } from './folderFreq.js';
 import type { SessionManager } from './sessionManager.js';
+import type { InputFile, InputImage } from './types.js';
+
+/** 폰이 보낸 images 페이로드 검증. 형식 오류면 null, 없으면 [] */
+function parseImages(raw: unknown): InputImage[] | null {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) return null;
+  const out: InputImage[] = [];
+  for (const it of raw) {
+    const o = (it ?? {}) as Record<string, unknown>;
+    if (typeof o.mediaType !== 'string' || typeof o.data !== 'string') return null;
+    if (!o.mediaType.startsWith('image/') || o.data.length === 0) return null;
+    out.push({ mediaType: o.mediaType, data: o.data });
+  }
+  return out;
+}
+
+/** 폰이 보낸 files(임의 파일) 페이로드 검증. 형식 오류면 null, 없으면 [] */
+function parseFiles(raw: unknown): InputFile[] | null {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) return null;
+  const out: InputFile[] = [];
+  for (const it of raw) {
+    const o = (it ?? {}) as Record<string, unknown>;
+    if (typeof o.name !== 'string' || typeof o.data !== 'string') return null;
+    if (!o.name.trim() || o.data.length === 0) return null;
+    out.push({ name: o.name, data: o.data, mediaType: typeof o.mediaType === 'string' ? o.mediaType : undefined });
+  }
+  return out;
+}
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
 
 /** REST 라우트 (전부 토큰 필요) */
 export function createApiRouter(manager: SessionManager): Router {
@@ -12,6 +49,11 @@ export function createApiRouter(manager: SessionManager): Router {
   router.get('/browse', (req, res) => {
     const path = typeof req.query.path === 'string' ? req.query.path : '';
     res.json(browse(path));
+  });
+
+  // 폴더 사용 빈도(경로→횟수) — 피커가 자주 연 폴더를 위로 올리는 데 사용
+  router.get('/folder-freq', (_req, res) => {
+    res.json({ freq: getFolderFreq() });
   });
 
   // 세션 목록
@@ -36,16 +78,44 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ session: view });
   });
 
-  // 명령 주입
+  // 명령 주입 (텍스트 + 선택적 이미지 인라인 + 선택적 파일 업로드)
   router.post('/sessions/:id/prompt', (req, res) => {
-    const { text } = req.body ?? {};
-    if (typeof text !== 'string' || !text.trim()) {
-      return res.status(400).json({ error: 'text가 필요합니다' });
+    const { text, images, files } = req.body ?? {};
+    const t = typeof text === 'string' ? text : '';
+    const imgs = parseImages(images);
+    if (imgs === null) {
+      return res.status(400).json({ error: 'images 형식 오류 (mediaType/data 필요)' });
     }
-    if (!manager.sendPrompt(req.params.id, text)) {
+    const fls = parseFiles(files);
+    if (fls === null) {
+      return res.status(400).json({ error: 'files 형식 오류 (name/data 필요)' });
+    }
+    if (!t.trim() && imgs.length === 0 && fls.length === 0) {
+      return res.status(400).json({ error: 'text 또는 images 또는 files가 필요합니다' });
+    }
+
+    // 세션 cwd 를 알아야 파일을 저장할 수 있다 (존재 확인 겸)
+    const view = manager.get(req.params.id);
+    if (!view) return res.status(404).json({ error: 'not found' });
+
+    // 업로드 파일은 cwd/.uploads/ 에 저장하고, 경로를 프롬프트에 덧붙여 Claude 가 읽게 한다.
+    let finalText = t;
+    if (fls.length > 0) {
+      let saved;
+      try {
+        saved = saveUploads(view.cwd, fls);
+      } catch (e) {
+        return res.status(500).json({ error: '파일 저장 실패: ' + (e instanceof Error ? e.message : String(e)) });
+      }
+      const list = saved.map((s) => `- ${s.relPath} (${fmtBytes(s.bytes)})`).join('\n');
+      const note = `[업로드된 파일 ${saved.length}개]\n${list}`;
+      finalText = t.trim() ? `${t}\n\n${note}` : `다음 업로드된 파일을 확인해줘:\n${note}`;
+    }
+
+    if (!manager.sendPrompt(req.params.id, finalText, imgs)) {
       return res.status(404).json({ error: 'not found' });
     }
-    res.json({ ok: true });
+    res.json({ ok: true, files: fls.length });
   });
 
   // 승인/거부

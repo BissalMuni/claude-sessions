@@ -15,7 +15,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const manager = new SessionManager();
 const app = express();
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '50mb' })); // base64 이미지/파일 첨부 수용
 app.use(express.urlencoded({ extended: false, limit: '1mb' })); // lite UI 폼 파싱
 
 // 구닥다리 e-ink 브라우저용 lite UI (JS 없는 서버 렌더링)

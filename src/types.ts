@@ -19,6 +19,19 @@ export interface StreamItem {
   at: string; // ISO 시각
 }
 
+/** 폰에서 첨부한 이미지 1장 (base64) — 메시지에 인라인으로 들어감 */
+export interface InputImage {
+  mediaType: string; // 예: 'image/png', 'image/jpeg'
+  data: string; // base64 (data: 접두사 제외)
+}
+
+/** 폰에서 첨부한 임의 파일 1개 (base64) — 디스크에 저장 후 경로를 Claude 에 전달 */
+export interface InputFile {
+  name: string; // 원본 파일명 (서버에서 안전하게 정제됨)
+  data: string; // base64
+  mediaType?: string; // 있으면 참고용 (없어도 됨)
+}
+
 /** 승인 대기 1건 */
 export interface PendingPermission {
   requestId: string; // 승인 식별자
@@ -57,6 +70,8 @@ export interface SessionView {
   createdAt: string;
   updatedAt: string;
   error: string | null;
+  /** SDK 가 응답 중이어야 하는데 오래 조용함 → '정체?' 표시 (중단이 아니라 신호) */
+  stalled: boolean;
 }
 
 /** WebSocket 으로 서버 → 폰 푸시되는 이벤트 */

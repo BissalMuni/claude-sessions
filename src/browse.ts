@@ -9,6 +9,12 @@ export interface BrowseResult {
   error: string | null;
 }
 
+/** 새 세션 피커가 처음 열릴 때 시작할 폴더. 없으면 드라이브 목록('')으로 폴백 */
+export function defaultStartPath(): string {
+  const dir = process.env.SCREEN_START_DIR || 'D:\\Coding';
+  return existsSync(dir) ? dir : '';
+}
+
 /** 윈도우 드라이브 목록 (C:\ D:\ …) */
 function listDrives(): string[] {
   const out: string[] = [];

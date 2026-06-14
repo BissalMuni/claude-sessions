@@ -1,0 +1,6 @@
+{
+  "name": "local-skills",
+  "description": "사용자 로컬 스킬(~/.claude/skills)을 모든 SDK 세션에 주입한다. skills/ 는 ~/.claude/skills 로의 junction 이므로 원본을 그대로 재사용한다.",
+  "version": "1.0.0",
+  "author": { "name": "user" }
+}
