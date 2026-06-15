@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "PowerShell(corepack enable pnpm; if\\($?\\){ corepack prepare pnpm@latest --activate }; \\(Get-Command pnpm -ErrorAction SilentlyContinue\\).Source)",
+      "PowerShell(npm install -g pnpm; \\(Get-Command pnpm -ErrorAction SilentlyContinue\\).Source)",
+      "PowerShell(Get-CimInstance Win32_OperatingSystem | Select-Object Caption, OSArchitecture, @{N='RAM_GB';E={[math]::Round\\($_.TotalVisibleMemorySize/1MB,1\\)}}, @{N='FreeRAM_GB';E={[math]::Round\\($_.FreePhysicalMemory/1MB,1\\)}} | Format-List)",
+      "PowerShell(Get-CimInstance Win32_StartupCommand)",
+      "PowerShell($id = [Security.Principal.WindowsIdentity]::GetCurrent\\(\\); $p = New-Object Security.Principal.WindowsPrincipal\\($id\\); \"IsAdmin: \" + $p.IsInRole\\([Security.Principal.WindowsBuiltInRole]::Administrator\\))"
     ]
   }
 }

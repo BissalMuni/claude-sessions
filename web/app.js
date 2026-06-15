@@ -454,8 +454,20 @@ function wireQuestion(s) {
 }
 
 // ---------- 새 세션 모달 + 폴더 피커 ----------
-// 새 세션 폴더 피커가 처음 열릴 때 시작할 폴더 (위로 가면 드라이브 목록까지 갈 수 있음)
-const START_DIR = 'D:\\Coding';
+// 새 세션 폴더 피커가 처음 열릴 때 시작할 폴더 (위로 가면 드라이브 목록까지 갈 수 있음).
+// 경로를 하드코딩하지 않고 서버에서 받아온다(서버 cwd 기준 자동 계산) → PC 이동/재클론에도 안 깨짐.
+// 한 번 받으면 캐시. 실패하면 ''(드라이브 목록)로 폴백.
+let START_DIR = null;
+async function getStartDir() {
+  if (START_DIR !== null) return START_DIR;
+  try {
+    const r = await api('GET', '/start-dir');
+    START_DIR = r && typeof r.path === 'string' ? r.path : '';
+  } catch {
+    START_DIR = '';
+  }
+  return START_DIR;
+}
 async function loadPicker(path) {
   try {
     // 폴더 목록과 사용 빈도를 동시에 가져온다 (LAN 이라 둘 다 가볍다)
@@ -530,12 +542,12 @@ function renderPickerSelected() {
   if (btn) btn.textContent = n > 0 ? `${n}개 세션 생성` : '생성';
 }
 
-$('new-btn').onclick = () => {
+$('new-btn').onclick = async () => {
   $('modal').classList.remove('hidden');
   $('modal-err').textContent = '';
   state.pickerSelected.clear();
   renderPickerSelected();
-  loadPicker(START_DIR);
+  loadPicker(await getStartDir());
 };
 $('modal-cancel').onclick = () => { state.pickerSelected.clear(); renderPickerSelected(); $('modal').classList.add('hidden'); };
 $('modal-create').onclick = async () => {

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { requireToken } from './auth.js';
-import { browse } from './browse.js';
+import { browse, defaultStartPath } from './browse.js';
 import { saveUploads } from './uploads.js';
 import { getFolderFreq } from './folderFreq.js';
 import type { SessionManager } from './sessionManager.js';
@@ -49,6 +49,12 @@ export function createApiRouter(manager: SessionManager): Router {
   router.get('/browse', (req, res) => {
     const path = typeof req.query.path === 'string' ? req.query.path : '';
     res.json(browse(path));
+  });
+
+  // 피커가 처음 열릴 때 시작할 폴더 — 서버에서 자동 계산해 SPA 에 알려준다.
+  // (클라이언트에 경로를 하드코딩하지 않기 위함. 비면 SPA 가 드라이브 목록으로 폴백)
+  router.get('/start-dir', (_req, res) => {
+    res.json({ path: defaultStartPath() });
   });
 
   // 폴더 사용 빈도(경로→횟수) — 피커가 자주 연 폴더를 위로 올리는 데 사용

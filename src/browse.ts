@@ -1,5 +1,5 @@
 import { readdirSync, statSync, existsSync } from 'node:fs';
-import { join, parse } from 'node:path';
+import { join, parse, dirname } from 'node:path';
 
 export interface BrowseResult {
   path: string; // 현재 경로 ('' = 드라이브 목록)
@@ -9,9 +9,14 @@ export interface BrowseResult {
   error: string | null;
 }
 
-/** 새 세션 피커가 처음 열릴 때 시작할 폴더. 없으면 드라이브 목록('')으로 폴백 */
+/**
+ * 새 세션 피커가 처음 열릴 때 시작할 폴더. 없으면 드라이브 목록('')으로 폴백.
+ * 기본값은 서버가 실행 중인 폴더(=이 프로젝트)의 부모 — 보통 여러 프로젝트가 모인
+ * 상위 폴더다. 이렇게 자동 계산하면 PC 를 옮기거나 다시 클론해도 경로를 고칠 필요가 없다.
+ * SCREEN_START_DIR 를 지정하면 그게 우선한다.
+ */
 export function defaultStartPath(): string {
-  const dir = process.env.SCREEN_START_DIR || 'D:\\Coding';
+  const dir = process.env.SCREEN_START_DIR || dirname(process.cwd());
   return existsSync(dir) ? dir : '';
 }
 

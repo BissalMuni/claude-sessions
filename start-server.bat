@@ -1,15 +1,17 @@
 @echo off
-REM claude-sessions 서버 시작 배치 (시작프로그램용)
-REM 지연 확장(delayed expansion)을 켜지 않으므로 "!" 토큰이 그대로 들어감
+REM claude-sessions server launcher (double-click to run)
+REM Delayed expansion is OFF, so "!" in the token stays literal.
 
-cd /d "D:\Coding\claude-sessions"
+cd /d "%~dp0"
 set "SCREEN_TOKEN=changeme"
-REM 타임아웃을 바꾸려면 아래 주석을 해제 (예: 12분)
+REM To change the stall timeout, uncomment below (e.g. 12 min):
 REM set "STALL_TIMEOUT_MS=720000"
 
-pnpm start
+REM pnpm 11's pre-run check aborts on esbuild's blocked build script,
+REM so launch the server directly via tsx (same as "pnpm start").
+node "node_modules\tsx\dist\cli.mjs" src\server.ts
 
-REM 서버가 종료되어도 창이 닫히지 않도록 (오류 확인용)
+REM Keep the window open after the server stops (for reading errors).
 echo.
-echo [서버가 종료되었습니다. 아무 키나 누르면 창이 닫힙니다.]
+echo [Server stopped. Press any key to close this window.]
 pause >nul

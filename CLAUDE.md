@@ -34,7 +34,7 @@ On boot the server prints the LAN URLs (`http://<PC-IP>:8787`) and the token. Op
 - `SCREEN_TOKEN` — access token; random hex if unset (printed to console)
 - `PORT` (default `8787`), `HOST` (default `0.0.0.0`, exposes on LAN)
 - `STALL_HINT_MS` (default `90000`) — silence threshold before a session shows a "stalled?" hint (display only; never kills the session)
-- `SCREEN_START_DIR` (default `D:\Coding`) — initial folder for the new-session folder picker
+- `SCREEN_START_DIR` (default: the parent folder of the server's cwd) — initial folder for the new-session folder picker
 - `SDK_DEBUG=1` — enable SDK subprocess debug output; `DEBUG_BLOCKS=1` — dump every SDK message's block types to console
 
 ## Architecture
