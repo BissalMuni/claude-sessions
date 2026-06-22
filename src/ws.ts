@@ -34,8 +34,8 @@ export function attachWebSocket(server: Server, manager: SessionManager): void {
     alive.add(ws);
     ws.on('pong', () => alive.add(ws));
 
-    // 접속 직후 현재 전체 상태 전송
-    ws.send(JSON.stringify({ type: 'snapshot', sessions: manager.list() }));
+    // 접속 직후 현재 전체 상태 전송 (+ 위험 모드 현재값)
+    ws.send(JSON.stringify({ type: 'snapshot', sessions: manager.list(), danger: manager.isDanger() }));
 
     // 이후 변경을 구독
     const unsubscribe = manager.subscribe((event) => {

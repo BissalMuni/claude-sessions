@@ -7,6 +7,7 @@ import { createApiRouter } from './api.js';
 import { createLiteRouter } from './lite.js';
 import { attachWebSocket } from './ws.js';
 import { SessionManager } from './sessionManager.js';
+import { isDanger } from './dangerMode.js';
 import { TOKEN } from './auth.js';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -14,6 +15,8 @@ const HOST = process.env.HOST || '0.0.0.0'; // LAN 의 다른 기기에서 접�
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const manager = new SessionManager();
+// 재기동: 디스크에 저장된 세션들을 SDK resume 으로 되살린다.
+const restoredCount = manager.restore();
 const app = express();
 app.use(express.json({ limit: '50mb' })); // base64 이미지/파일 첨부 수용
 app.use(express.urlencoded({ extended: false, limit: '1mb' })); // lite UI 폼 파싱
@@ -37,6 +40,12 @@ server.listen(PORT, HOST, () => {
   console.log(' 폰 브라우저 접속:');
   for (const ip of ips) console.log(`   http://${ip}:${PORT}`);
   console.log(`   (로컬: http://localhost:${PORT})`);
+  if (restoredCount) console.log(` 복원된 세션: ${restoredCount}개 (SDK resume)`);
+  if (isDanger()) {
+    console.log(' ⚠ 위험 모드 ON (기본값): 모든 도구 자동 실행, AskUserQuestion 만 폰 질문. 폰 스위치 또는 SCREEN_DANGER=0 으로 끌 수 있음');
+  } else {
+    console.log(' 안전 모드 (SCREEN_DANGER=0): 모든 도구가 폰 Yes/No 승인을 거침. 폰 스위치로 켤 수 있음');
+  }
   console.log('─'.repeat(56));
 });
 

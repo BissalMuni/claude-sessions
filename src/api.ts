@@ -62,6 +62,20 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ freq: getFolderFreq() });
   });
 
+  // 위험 모드 조회
+  router.get('/danger', (_req, res) => {
+    res.json({ danger: manager.isDanger() });
+  });
+
+  // 위험 모드 토글 (폰 ON/OFF 스위치) — 모든 기기에 동기화 브로드캐스트됨
+  router.post('/danger', (req, res) => {
+    const { danger } = req.body ?? {};
+    if (typeof danger !== 'boolean') {
+      return res.status(400).json({ error: 'danger(boolean)가 필요합니다' });
+    }
+    res.json({ danger: manager.setDanger(danger) });
+  });
+
   // 세션 목록
   router.get('/sessions', (_req, res) => {
     res.json({ sessions: manager.list() });

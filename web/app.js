@@ -1,6 +1,9 @@
 // 폰 클라이언트 — 토큰 인증, WebSocket 수신, 세션 목록/상세/승인/명령
 
 const $ = (id) => document.getElementById(id);
+
+// 모바일(터치 위주) 여부 — 데스크톱은 엔터 전송, 모바일은 Ctrl/Cmd+엔터 전송
+const isMobile = () => window.matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 const state = {
   token: localStorage.getItem('sm_token') || '',
   sessions: new Map(), // id -> SessionView
@@ -15,6 +18,7 @@ const state = {
   noticeFlashUntil: 0, // 이 시각(ms)까지 종 버튼 깜빡임 효과 유지 (새 알림 후 2초)
   flashTimer: null, // 깜빡임 종료 시 화면을 한 번 더 그려 효과를 끄는 타이머
   pickerSelected: new Set(), // 새 세션 모달에서 다중 선택한 폴더 경로(한 번에 여러 세션 생성)
+  danger: true, // 위험 모드(모든 도구 자동 실행). 서버 snapshot/danger 이벤트로 동기화. 기본 ON.
 };
 
 // ---------- 폴더 사용 빈도 (자주 여는 프로젝트를 위로) ----------
@@ -145,6 +149,9 @@ function handleEvent(ev) {
     state.sessions.clear();
     for (const s of ev.sessions) { state.sessions.set(s.id, s); state.prevStatus.set(s.id, s.status); }
     state.notified = state.notified.filter((id) => state.sessions.has(id)); // 재연결 시 큐 정리
+    if (typeof ev.danger === 'boolean') state.danger = ev.danger; // 위험 모드 현재값 동기화
+  } else if (ev.type === 'danger') {
+    state.danger = ev.danger; // 다른 기기에서 토글한 결과 동기화
   } else if (ev.type === 'session_update') {
     state.sessions.set(ev.session.id, ev.session);
     if (answered(ev.session)) enqueueNotice(ev.session.id);
@@ -277,6 +284,16 @@ function renderDetail() {
     ${s.question ? renderQuestion(s) : ''}
     <div class="log" id="log"></div>
     <div class="composer">
+      <div class="quick-actions" id="quick-actions">
+        <button class="qa-btn" id="qa-status" title="현재 프로젝트 현황 정리 + 이전 대화 분석 후 이어가기">현황</button>
+        <button class="qa-btn" id="qa-commit" title="변경사항 커밋 후 푸시">커푸</button>
+        <button class="qa-btn qa-nav" id="qa-prev" title="이전 프로젝트">◀</button>
+        <button class="qa-btn qa-nav" id="qa-next" title="다음 프로젝트">▶</button>
+        <button class="qa-btn qa-refresh" id="qa-refresh" title="새로고침(다시 연결/동기화)">⟳</button>
+        <button class="qa-btn qa-danger ${state.danger ? 'on' : 'off'}" id="qa-danger"
+          title="위험 모드: 켜면 모든 도구를 묻지 않고 자동 실행(AskUserQuestion만 폰 질문)">
+          ${state.danger ? '위험 ON' : '안전 OFF'}</button>
+      </div>
       <div class="thumbs" id="thumbs"></div>
       <div class="files" id="files"></div>
       <div class="composer-row">
@@ -375,14 +392,59 @@ function renderDetail() {
   };
   $('send').onclick = send;
   prompt.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+    if (e.key !== 'Enter') return;
+    // IME 조합 중에는 무시 (한글 입력 도중 엔터로 전송되는 것 방지)
+    if (e.isComposing || e.keyCode === 229) return;
+    if (isMobile()) {
+      // 모바일: 기존 동작 유지 (Ctrl/Cmd+Enter로 전송)
+      if (e.ctrlKey || e.metaKey) { e.preventDefault(); send(); }
+    } else {
+      // 데스크톱: 엔터=전송, 쉬프트+엔터=줄바꿈
+      if (!e.shiftKey) { e.preventDefault(); send(); }
+    }
   });
+
+  // 빠른 실행 버튼: 자주 쓰는 프롬프트 두 개(현황/커푸)와 프로젝트 이동(◀▶)
+  $('qa-status').onclick = () => sendQuickPrompt(s,
+    '지금 이 프로젝트의 현황을 정리해줘. 이전 대화와 작업 상태(변경된 파일, 하던 작업, 미완료 항목)를 분석한 뒤, 무엇을 하던 중이었고 다음에 무엇을 해야 하는지 알려주고 이어서 진행해줘.');
+  $('qa-commit').onclick = () => sendQuickPrompt(s,
+    '변경사항을 커밋하고 푸시해줘. 커밋 메시지는 변경 내용을 요약해서 작성해줘.');
+  $('qa-prev').onclick = () => navProject(-1);
+  $('qa-next').onclick = () => navProject(1);
+  // 새로고침: 페이지를 다시 불러와 WS 재연결 + 최신 스냅샷 수신
+  $('qa-refresh').onclick = () => location.reload();
+  // 위험 모드 ON/OFF 토글: 서버에 반영 → danger 이벤트로 모든 기기 동기화
+  $('qa-danger').onclick = () => toggleDanger();
 
   if (s.pending) {
     $('perm-yes').onclick = () => decide(s, 'yes');
     $('perm-no').onclick = () => decide(s, 'no');
   }
   if (s.question) wireQuestion(s);
+}
+
+// 빠른 실행: 입력창을 거치지 않고 즉시 프롬프트를 전송한다 (폰에서 한 번 탭).
+function sendQuickPrompt(s, text) {
+  api('POST', `/sessions/${s.id}/prompt`, { text, images: [], files: [] }).catch(showErr);
+}
+
+// 위험 모드 토글. 켜면 모든 도구가 폰 승인 없이 자동 실행되므로, OFF→ON 시 한 번 확인한다.
+// 서버가 danger 이벤트를 브로드캐스트하면 모든 기기의 버튼이 동기화된다.
+function toggleDanger() {
+  const next = !state.danger;
+  if (next && !confirm('위험 모드를 켤까요?\n모든 도구가 승인 없이 자동 실행됩니다. (AskUserQuestion만 폰으로 질문)')) return;
+  state.danger = next; // 낙관적 갱신 — 서버 응답/브로드캐스트로 곧 확정됨
+  render();
+  api('POST', '/danger', { danger: next }).catch((e) => { showErr(e); state.danger = !next; render(); });
+}
+
+// 프로젝트 이동: 생성순(createdAt)으로 고정 정렬해 ◀/▶ 가 튀지 않게 하고, 양끝에서 순환한다.
+function navProject(dir) {
+  const ordered = [...state.sessions.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  if (ordered.length === 0) return;
+  const idx = ordered.findIndex((x) => x.id === state.selected);
+  const next = idx < 0 ? ordered[0] : ordered[(idx + dir + ordered.length) % ordered.length];
+  selectSession(next.id);
 }
 
 function renderPerm(s) {
@@ -491,13 +553,15 @@ async function loadPicker(path) {
     const dirs = [...b.dirs].sort((a, c) => (freq[c] || 0) - (freq[a] || 0) || a.localeCompare(c));
     for (const d of dirs) {
       const used = freq[d] || 0;
+      // 전체 경로 대신 폴더 이름만 표시(현재 경로는 헤더·입력칸에 그대로 보인다).
+      const name = d.split(/[\\/]/).filter(Boolean).pop() || d;
       const row = document.createElement('div');
       row.className = 'picker-row pick' + (state.pickerSelected.has(d) ? ' sel' : '');
       row.dataset.path = d;
       // 체크박스(다중 선택) + 폴더명(클릭 시 진입). 둘의 역할을 분리한다.
       row.innerHTML =
         `<button class="pick-check" title="여러 개 선택">${state.pickerSelected.has(d) ? '☑' : '☐'}</button>` +
-        `<span class="pick-name">📁 ${esc(d)}${used ? ` <span class="freq">★${used}</span>` : ''}</span>`;
+        `<span class="pick-name" title="${esc(d)}">📁 ${esc(name)}${used ? ` <span class="freq">★${used}</span>` : ''}</span>`;
       row.querySelector('.pick-check').onclick = (e) => { e.stopPropagation(); togglePick(d); };
       row.querySelector('.pick-name').onclick = () => loadPicker(d);
       list.appendChild(row);

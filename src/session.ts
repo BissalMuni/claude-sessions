@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AsyncQueue } from './asyncQueue.js';
+import { isDanger } from './dangerMode.js';
 import { shortId } from './ids.js';
 import { registerPermission, registerQuestion, rejectSessionPermissions } from './permissions.js';
 import type {
@@ -16,6 +17,39 @@ import type {
 } from './types.js';
 
 const MAX_MESSAGES = 300; // 폰 메모리 보호: 최근 N개만 유지
+
+// 위험 모드는 런타임 토글(dangerMode.ts)로 관리한다. 켜지면 AskUserQuestion(프로젝트
+// 방향 결정)을 제외한 모든 도구를 폰에 묻지 않고 자동 허용한다. 기본은 ON.
+// canUseTool 안에서 isDanger() 를 매 호출마다 읽으므로, 폰 스위치로 즉시 반영된다.
+
+// 모든 세션에 공통 주입되는 "헌법". Claude Code 프리셋 시스템 프롬프트에 append 된다.
+// 핵심: 프로젝트 방향에 영향을 주는 결정에서는 임의로 진행하지 말고 AskUserQuestion 으로 물어라.
+const CONSTITUTION = [
+  '## 운영 헌법 (claude-sessions)',
+  '너는 사용자가 폰으로 원격 감시하는 자율 세션이다. 다음을 항상 지켜라:',
+  '- 프로젝트 방향에 영향을 주는 결정에 부딪히면 임의로 진행하지 말고 `AskUserQuestion` 으로 사용자에게 물어라.',
+  '  해당: 아키텍처/기술 선택, 요구사항이 모호하거나 해석이 갈릴 때,',
+  '  비가역적·위험한 작업(데이터/파일 삭제, force push, 배포, 시스템 설정 변경, 재부팅),',
+  '  작업 범위가 크게 늘어나는 변경.',
+  '- 그 외 일상적인 읽기·탐색·빌드·편집은 멈추지 말고 진행하라.',
+  '- 질문할 때는 선택지를 구체적으로 제시하고 첫 번째에 권장안을 둬라.',
+].join('\n');
+
+// 위험 모드일 때만 덧붙이는 경고. 도구가 자동 실행되므로 질문이 유일한 안전장치임을 명시.
+const DANGER_NOTE = [
+  '',
+  '## 위험 모드 안내',
+  '현재 모든 도구는 사용자 승인 없이 자동 실행된다.',
+  '따라서 위 "방향 결정 시 질문" 규칙이 사용자가 개입할 수 있는 유일한 안전장치다.',
+  '특히 비가역적·위험한 작업을 실행하기 전에는 반드시 먼저 `AskUserQuestion` 으로 확인하라.',
+].join('\n');
+
+// 세션 시작 시점의 위험 모드에 맞춰 시스템 프롬프트 append 를 만든다.
+// (이미 떠 있는 세션의 systemPrompt 는 바꿀 수 없으므로, 토글 이후 새로 만든
+//  세션부터 경고가 반영된다. 게이트 동작 자체는 isDanger() 로 즉시 반영됨.)
+function buildSystemAppend(): string {
+  return isDanger() ? `${CONSTITUTION}\n${DANGER_NOTE}` : CONSTITUTION;
+}
 
 // 이 시간(ms)보다 오래 SDK 가 무응답이면 '정체?'로 표시한다. 끊지 않는다 — 보여주기만.
 const STALL_HINT_MS = Number(process.env.STALL_HINT_MS) || 90_000;
@@ -33,6 +67,13 @@ export interface SessionOpts {
   cwd: string;
   /** 상태가 바뀔 때마다 호출 (WebSocket broadcast 연결용) */
   onUpdate: (view: SessionView) => void;
+  /** 복원용: 재기동 시 이어받을 SDK 세션 id (있으면 query 에 resume 로 전달) */
+  resumeSessionId?: string | null;
+  /** 복원용: 폰에 다시 보여줄 이전 대화 기록 */
+  initialMessages?: StreamItem[];
+  /** 복원용: 원래 생성/갱신 시각 (없으면 now) */
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 /** 하나의 Claude Agent SDK 세션 = 작업 한 줄기 */
@@ -48,8 +89,8 @@ export class Session {
   private pending: PendingPermission | null = null;
   private question: PendingQuestion | null = null;
   private error: string | null = null;
-  private readonly createdAt = new Date().toISOString();
-  private updatedAt = this.createdAt;
+  private readonly createdAt: string;
+  private updatedAt: string;
 
   // stall 감지: SDK 로부터 마지막으로 무언가 받은(혹은 입력을 주입한) 시각.
   private lastActivityAt = Date.now();
@@ -66,6 +107,11 @@ export class Session {
     this.title = opts.title;
     this.cwd = opts.cwd;
     this.onUpdate = opts.onUpdate;
+    // 복원 케이스: 이전 sdkSessionId/기록/시각을 이어받는다. 없으면 새 세션.
+    this.sdkSessionId = opts.resumeSessionId ?? null;
+    this.messages = opts.initialMessages ? [...opts.initialMessages] : [];
+    this.createdAt = opts.createdAt ?? new Date().toISOString();
+    this.updatedAt = opts.updatedAt ?? this.createdAt;
   }
 
   /** SDK query 루프를 시작한다 */
@@ -75,11 +121,17 @@ export class Session {
       options: {
         cwd: this.cwd,
         abortController: this.abort,
+        // 복원 케이스: 이전 SDK 세션을 이어받는다(~/.claude/projects/ 의 transcript 로드).
+        // 없으면 undefined → 새 세션으로 시작. resume 는 streaming-input 모드와 함께 동작한다.
+        ...(this.sdkSessionId ? { resume: this.sdkSessionId } : {}),
         // 전역 ~/.claude/settings.json 의 allow 규칙을 상속하지 않는다.
         // 'project'만 로드 → 프로젝트 CLAUDE.md 는 살리되, 모든 도구 승인은
         // canUseTool(=폰)로 강제된다. (전역 allowlist 가 게이트를 우회하는 것 방지)
         settingSources: ['project'],
         permissionMode: 'default',
+        // Claude Code 기본 시스템 프롬프트 + 공통 헌법(SYSTEM_APPEND) 주입.
+        // 위험 모드면 헌법에 "도구 자동 실행" 경고가 덧붙는다.
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: buildSystemAppend() },
         // 로컬 스킬 플러그인 주입 + 전부 활성화. settingSources 와 무관하게 로드되므로
         // 전역 allowlist 는 끌어오지 않는다 → 폰 승인 게이트(canUseTool) 그대로 유지.
         // 스킬이 부르는 도구도 여전히 canUseTool 을 거쳐 폰 승인을 받는다.
@@ -110,6 +162,13 @@ export class Session {
               behavior: 'allow',
               updatedInput: { ...(input as Record<string, unknown>), answers: answers ?? {} },
             };
+          }
+
+          // 위험 모드: 방향 결정(AskUserQuestion)을 제외한 모든 도구는 묻지 않고 자동 허용.
+          // 어떤 도구가 돌았는지는 assistant 의 tool_use 블록으로 폰 스트림에 그대로 남는다.
+          // isDanger() 를 매 호출마다 읽으므로, 폰 스위치 토글이 진행 중 세션에도 즉시 반영된다.
+          if (isDanger()) {
+            return { behavior: 'allow', updatedInput: input };
           }
 
           const requestId = shortId('perm');

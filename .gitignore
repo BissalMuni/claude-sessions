@@ -33,3 +33,6 @@ Thumbs.db
 
 # Misc
 *.tsbuildinfo
+
+# 스케줄러 런타임 락 (일시적)
+.claude/scheduled_tasks.lock

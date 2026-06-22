@@ -6,7 +6,11 @@
       "PowerShell(npm install -g pnpm; \\(Get-Command pnpm -ErrorAction SilentlyContinue\\).Source)",
       "PowerShell(Get-CimInstance Win32_OperatingSystem | Select-Object Caption, OSArchitecture, @{N='RAM_GB';E={[math]::Round\\($_.TotalVisibleMemorySize/1MB,1\\)}}, @{N='FreeRAM_GB';E={[math]::Round\\($_.FreePhysicalMemory/1MB,1\\)}} | Format-List)",
       "PowerShell(Get-CimInstance Win32_StartupCommand)",
-      "PowerShell($id = [Security.Principal.WindowsIdentity]::GetCurrent\\(\\); $p = New-Object Security.Principal.WindowsPrincipal\\($id\\); \"IsAdmin: \" + $p.IsInRole\\([Security.Principal.WindowsBuiltInRole]::Administrator\\))"
+      "PowerShell($id = [Security.Principal.WindowsIdentity]::GetCurrent\\(\\); $p = New-Object Security.Principal.WindowsPrincipal\\($id\\); \"IsAdmin: \" + $p.IsInRole\\([Security.Principal.WindowsBuiltInRole]::Administrator\\))",
+      "PowerShell($paths = @\\(\"C:\\\\Program Files\\\\Tailscale\\\\tailscale.exe\", \"C:\\\\Program Files \\(x86\\)\\\\Tailscale\\\\tailscale.exe\"\\); foreach \\($p in $paths\\) { if \\(Test-Path $p\\) { Write-Output \"Found: $p\" } })",
+      "PowerShell(tailscale status *)",
+      "PowerShell(tailscale netcheck *)",
+      "PowerShell(Get-NetFirewallProfile *)"
     ]
   }
 }
