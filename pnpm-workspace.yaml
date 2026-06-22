@@ -1,4 +1,5 @@
+# pnpm 11이 요구하는 빌드 승인 결정.
+# esbuild 네이티브 빌드는 불필요(tsx가 자체 esbuild를 번들)하므로 false로 둔다.
+# false = "빌드하지 않음"으로 결정 기록 → ERR_PNPM_IGNORED_BUILDS가 더는 발생하지 않음.
 allowBuilds:
-  esbuild: set this to true or false
-onlyBuiltDependencies:
-  - esbuild
+  esbuild: false
