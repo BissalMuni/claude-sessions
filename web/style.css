@@ -86,12 +86,14 @@ input, textarea {
 /* 레이아웃 */
 .app { display: flex; flex-direction: column; height: 100%; }
 .topbar {
-  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px;
   border-bottom: 1px solid var(--line); background: var(--panel);
 }
-.topbar strong { margin-right: auto; }
-.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); flex: none; }
-.dot.on { background: var(--green); }
+/* 상단 관리버튼 6개를 한 줄에 균등 배치 — 박스/글자 패딩을 줄여 좁은 폰에서도 안 넘침 */
+.tb-btn {
+  flex: 1 1 0; min-width: 0; padding: 8px 4px; font-size: 14px;
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .layout { flex: 1; display: flex; min-height: 0; }
 .list { width: 240px; border-right: 1px solid var(--line); overflow-y: auto; flex: none; background: var(--panel); }
 .detail { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -116,11 +118,11 @@ input, textarea {
 @keyframes stalledPulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 
 /* 상세 */
-.detail-head { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--panel); }
-.detail-head .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.detail-head .actions { margin-left: auto; display: flex; gap: 8px; }
-.detail-head .actions .nav { padding: 5px 8px; font-size: 14.4px; line-height: 1; display: inline-flex; align-items: center; gap: 4px; }
-.detail-head .actions .nav:disabled { opacity: .35; cursor: default; }
+.detail-head { padding: 8px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; background: var(--panel); }
+.detail-head .title { flex: 1 1 auto; min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.detail-head #d-notice { margin-left: auto; }
+.detail-head .nav { padding: 5px 8px; font-size: 14.4px; line-height: 1; display: inline-flex; align-items: center; gap: 4px; }
+.detail-head .nav:disabled { opacity: .35; cursor: default; }
 .notice-count { min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px; background: rgba(0,0,0,.4); color: #fff; font-size: 12px; font-weight: 700; line-height: 15px; text-align: center; }
 
 /* 알림(종) 버튼: 시계바늘 궤도처럼 색이 도는 그라데이션 배경 */
@@ -207,16 +209,16 @@ input, textarea {
 /* 빠른 실행 버튼 바 (현황 / 커푸 / 이전·다음 / 새로고침 / 위험 ON·OFF — 6버튼 나란히) */
 .quick-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .qa-btn {
-  flex: 1 1 0; min-width: 56px; padding: 11px 8px;
+  flex: 1 1 0; min-width: 0; padding: 9px 4px; white-space: nowrap;
   background: var(--panel2); color: var(--text); border: 1px solid var(--line);
-  border-radius: 8px; font-size: 16px; font-weight: 600;
+  border-radius: 8px; font-size: 15px; font-weight: 600;
 }
 .qa-btn:active { background: var(--line); }
-.qa-btn.qa-nav { flex: 0 0 auto; min-width: 42px; color: var(--muted); font-weight: 400; }
+.qa-btn.qa-nav { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; }
 /* 새로고침: 나란히 6버튼 중 기호 버튼 — 좁게, 회전 기호 크게 */
-.qa-btn.qa-refresh { flex: 0 0 auto; min-width: 42px; color: var(--muted); font-weight: 400; font-size: 19px; }
+.qa-btn.qa-refresh { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; font-size: 18px; }
 /* 위험 모드 ON/OFF 토글: ON=빨강(자동 실행 경고), OFF=초록(안전) */
-.qa-btn.qa-danger { flex: 1 1 0; min-width: 64px; font-weight: 700; border-width: 1px; }
+.qa-btn.qa-danger { flex: 1 1 0; min-width: 0; font-weight: 700; border-width: 1px; }
 .qa-btn.qa-danger.on  { background: rgba(239,68,68,.18);  color: #fca5a5; border-color: var(--red); }
 .qa-btn.qa-danger.off { background: rgba(34,197,94,.16); color: #86efac; border-color: var(--green); }
 .qa-btn.qa-danger:active { filter: brightness(1.25); }
@@ -263,7 +265,7 @@ input, textarea {
   body.viewing .detail { display: flex; }
   .back-btn { display: inline-block; }  /* 상세에서 목록으로 돌아가는 버튼 */
 
-  /* 좁은 폭에서 버튼이 넘치지 않게 줄바꿈 + 터치 영역 확보 */
-  .topbar { flex-wrap: wrap; }
+  /* 관리버튼 6개는 균등(flex:1)·축소(min-width:0)라 한 줄에 들어감 → 줄바꿈 금지 */
+  .topbar { flex-wrap: nowrap; gap: 5px; padding: 8px; }
   .composer textarea { height: 52px; }
 }

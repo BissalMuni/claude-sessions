@@ -109,6 +109,38 @@ $('token-btn').onclick = () => {
 };
 $('token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('token-btn').click(); });
 $('list-btn').onclick = () => selectSession(null); // 상단바: 목록으로 복귀
+
+// 상단바 세션 동작 버튼(중단/리셋/종료): 현재 선택된 세션(state.selected)에 대해 동작.
+// 정적 버튼이라 시작 시 한 번만 연결한다. 세션 미선택 시엔 render()가 .tb-sess 를 숨긴다.
+$('tb-interrupt').onclick = () => {
+  const id = state.selected;
+  if (id) api('POST', `/sessions/${id}/interrupt`).catch(showErr);
+};
+$('tb-remove').onclick = () => {
+  const id = state.selected;
+  if (id && confirm('이 세션을 종료할까요?')) api('DELETE', `/sessions/${id}`).catch(showErr);
+};
+$('tb-reset').onclick = () => {
+  const s = state.selected ? state.sessions.get(state.selected) : null;
+  if (s) resetSession(s);
+};
+
+// 새 대화: 이 세션을 닫고 같은 폴더로 새 세션을 연다(서버의 대화/컨텍스트 초기화).
+async function resetSession(s) {
+  if (!confirm('이 세션을 닫고 같은 폴더로 새 세션을 열까요?\n(대화와 컨텍스트가 초기화됩니다)')) return;
+  try {
+    const d = await api('POST', '/sessions', { cwd: s.cwd, title: s.title }); // 먼저 새 세션 확보
+    state.sessions.set(d.session.id, d.session);
+    await api('DELETE', `/sessions/${s.id}`).catch(() => {}); // 기존 세션 종료(실패해도 진행)
+    state.sessions.delete(s.id);
+    state.drafts.delete(s.id);
+    state.images.delete(s.id);
+    state.files.delete(s.id);
+    state.prevStatus.delete(s.id);
+    clearNotice(s.id);
+    selectSession(d.session.id); // 새 세션으로 이동
+  } catch (e) { showErr(e); }
+}
 $('logout-btn').onclick = () => {
   localStorage.removeItem('sm_token');
   state.token = '';
@@ -135,9 +167,9 @@ function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
   state.ws = ws;
-  ws.onopen = () => $('conn').classList.add('on');
+  ws.onopen = () => $('conn')?.classList.add('on'); // 연결 동그라미는 제거됨 → 있으면만 갱신
   ws.onclose = (e) => {
-    $('conn').classList.remove('on');
+    $('conn')?.classList.remove('on');
     if (e.code === 4001) { showGate('토큰이 올바르지 않습니다.'); return; }
     setTimeout(() => { if (state.token) connect(); }, 1500); // 자동 재연결
   };
@@ -214,6 +246,8 @@ function render() {
   // 폰 마스터-디테일: 유효한 세션이 선택됐을 때만 상세 화면을 보인다
   const hasSel = state.selected != null && state.sessions.has(state.selected);
   document.body.classList.toggle('viewing', hasSel);
+  // 상단 세션 동작 버튼(중단/리셋/종료)은 세션 선택 시에만 노출
+  document.querySelectorAll('.tb-sess').forEach((b) => b.classList.toggle('hidden', !hasSel));
   renderList();
   renderDetail();
 
@@ -273,12 +307,7 @@ function renderDetail() {
     <div class="detail-head">
       <span class="title">${esc(s.title)}</span>
       ${statusBadge(s)}
-      <div class="actions">
-        <button class="ghost nav" id="d-notice" title="알림 세션으로 이동(먼저 등록된 순)">🔔<span class="notice-count" id="d-notice-count">0</span></button>
-        <button class="ghost" id="d-interrupt">중단</button>
-        <button class="ghost" id="d-reset" title="이 세션을 닫고 같은 폴더로 새 세션 열기(대화/컨텍스트 초기화)">리셋</button>
-        <button class="ghost" id="d-remove">종료</button>
-      </div>
+      <button class="ghost nav" id="d-notice" title="알림 세션으로 이동(먼저 등록된 순)">🔔<span class="notice-count" id="d-notice-count">0</span></button>
     </div>
     ${s.pending ? renderPerm(s) : ''}
     ${s.question ? renderQuestion(s) : ''}
@@ -315,25 +344,8 @@ function renderDetail() {
   }
   // 스크롤 위치는 render() 가 보존/복원한다 (여기서 강제로 맨 아래로 내리지 않음)
 
-  $('d-interrupt').onclick = () => api('POST', `/sessions/${s.id}/interrupt`).catch(showErr);
-  $('d-remove').onclick = () => { if (confirm('이 세션을 종료할까요?')) api('DELETE', `/sessions/${s.id}`).catch(showErr); };
-
-  // 새 대화: 이 세션을 닫고 같은 폴더로 새 세션을 연다(서버의 대화/컨텍스트 초기화)
-  $('d-reset').onclick = async () => {
-    if (!confirm('이 세션을 닫고 같은 폴더로 새 세션을 열까요?\n(대화와 컨텍스트가 초기화됩니다)')) return;
-    try {
-      const d = await api('POST', '/sessions', { cwd: s.cwd, title: s.title }); // 먼저 새 세션 확보
-      state.sessions.set(d.session.id, d.session);
-      await api('DELETE', `/sessions/${s.id}`).catch(() => {}); // 기존 세션 종료(실패해도 진행)
-      state.sessions.delete(s.id);
-      state.drafts.delete(s.id);
-      state.images.delete(s.id);
-      state.files.delete(s.id);
-      state.prevStatus.delete(s.id);
-      clearNotice(s.id);
-      selectSession(d.session.id); // 새 세션으로 이동
-    } catch (e) { showErr(e); }
-  };
+  // 중단/리셋/종료 버튼은 상단 topbar(tb-interrupt/tb-reset/tb-remove)로 옮겨졌고,
+  // 시작 시 한 번 state.selected 기준으로 연결된다(여기서 매 렌더마다 다시 연결하지 않음).
 
   // 상단바 🔔 : 답변이 뜬(알림) 세션 개수를 보여주고,
   // 누르면 제일 먼저 등록된(선입선출) 세션으로 이동한다.

@@ -52,7 +52,7 @@ export function createLiteRouter(manager: SessionManager): Router {
   // 로그인 페이지
   router.get('/', (req, res) => {
     if (!authed(req)) return res.send(loginPage());
-    res.send(dashboardPage(manager.list(), TOKEN));
+    res.send(dashboardPage(manager.list(), TOKEN, manager.isDanger()));
   });
 
   // 세션 상세
@@ -66,7 +66,7 @@ export function createLiteRouter(manager: SessionManager): Router {
     const ordered = [...manager.list()].sort(byImportance);
     const idx = ordered.findIndex((x) => x.id === id);
     const nextId = idx >= 0 && ordered.length > 1 ? ordered[(idx + 1) % ordered.length].id : null;
-    res.send(detailPage(view, TOKEN, nextId));
+    res.send(detailPage(view, TOKEN, nextId, manager.isDanger()));
   });
 
   // 폴더 피커 (새 세션)
@@ -142,6 +142,19 @@ export function createLiteRouter(manager: SessionManager): Router {
     res.redirect(liteUrl('/lite', { token: TOKEN }));
   });
 
+  // 위험 모드 토글 (JS 없는 폼). 켜기는 자동 실행을 여는 동작이라 확인 페이지를 한 번 거친다.
+  // 끄기(안전 방향)는 즉시 적용. 토글하면 SPA 등 모든 기기에 danger 이벤트가 브로드캐스트된다.
+  router.post('/danger', (req, res) => {
+    if (!authed(req)) return res.send(loginPage());
+    const to = req.body.to === 'on' ? 'on' : 'off';
+    const back = String(req.body.back || ''); // 'dashboard' 또는 세션 id
+    if (to === 'on' && req.body.confirm !== '1') {
+      return res.send(dangerConfirmPage(TOKEN, back));
+    }
+    manager.setDanger(to === 'on');
+    res.redirect(liteBackUrl(back, TOKEN));
+  });
+
   return router;
 }
 
@@ -186,6 +199,7 @@ h2{font-size:29px;margin:14px 0 6px;}
 .btnrow td form{display:block;margin:0;}
 .btnrow td .btn{display:block;width:100%;box-sizing:border-box;margin:0;border:0;border-radius:0;background:#fff;color:#000;padding:14px 4px;font-size:27px;line-height:1.2;white-space:nowrap;overflow:hidden;}
 .row{border:2px solid #000;padding:10px;margin-bottom:10px;}
+.danger-on{border-width:4px;}
 .muted{color:#444;font-size:23px;}
 .tag{border:1px solid #000;padding:1px 8px;font-size:21px;}
 .tag-await{background:#000;color:#fff;}
@@ -214,7 +228,7 @@ function loginPage(): string {
   );
 }
 
-function dashboardPage(sessions: SessionView[], token: string): string {
+function dashboardPage(sessions: SessionView[], token: string, danger: boolean): string {
   const sorted = [...sessions].sort(byImportance);
   const rows = sorted.length
     ? sorted.map((s) => dashboardRow(s, token)).join('')
@@ -222,6 +236,7 @@ function dashboardPage(sessions: SessionView[], token: string): string {
   const body = `<div class="bar">
   <h1>세션 (${sorted.length})</h1>
 </div>
+${dangerBar(token, danger, 'dashboard')}
 ${rows}
 <p class="muted">이 화면은 15초마다 자동 새로고침됩니다.</p>
 <div class="dock">
@@ -253,7 +268,7 @@ ${approveForm(s.id, s.pending.requestId, token, 'dashboard')}`;
 </div>`;
 }
 
-function detailPage(s: SessionView, token: string, nextId?: string | null): string {
+function detailPage(s: SessionView, token: string, nextId: string | null | undefined, danger: boolean): string {
   const msgs = s.messages.slice(-40);
   const log = msgs.length
     ? msgs
@@ -280,6 +295,7 @@ function detailPage(s: SessionView, token: string, nextId?: string | null): stri
   <p class="ctrls">
     <a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>
     <a class="btn" href="${liteUrl('/lite/session', { token, id: s.id })}">↻ 새로고침</a>
+    ${dangerToggle(token, danger, s.id)}
   </p>
 </div>
 <div class="muted">${esc(s.cwd)}</div>
@@ -405,6 +421,62 @@ function questionForm(s: SessionView, token: string): string {
   ${blocks}
   <p><button class="btn btn-big" type="submit">선택 전송</button></p>
 </form>`;
+}
+
+// 위험 모드 배너 (대시보드용, 큼직하게). 현재 상태 + 반대로 가는 토글 버튼 1개.
+function dangerBar(token: string, danger: boolean, back: string): string {
+  if (danger) {
+    return `<div class="row danger-on">
+  <b>⚠ 위험 모드 ON</b> <span class="muted">모든 도구 자동 실행 · AskUserQuestion만 폰 질문</span>
+  ${btnRow([dangerForm(token, 'off', back, '🔒 안전 모드로 끄기')])}
+</div>`;
+  }
+  return `<div class="row">
+  <b>🔒 안전 모드</b> <span class="muted">모든 도구가 폰 승인(허가/거부)을 거침</span>
+  ${btnRow([dangerForm(token, 'on', back, '⚠ 위험 모드 켜기')])}
+</div>`;
+}
+
+// 위험 모드 컴팩트 토글 (상세 상단 바용). 현재 상태가 라벨에 드러난다.
+function dangerToggle(token: string, danger: boolean, back: string): string {
+  return danger
+    ? dangerForm(token, 'off', back, '⚠ 위험 ON (끄기)')
+    : dangerForm(token, 'on', back, '🔒 안전 (위험 켜기)');
+}
+
+// 위험 모드 토글 폼 1개. to='on' 이면 서버가 확인 페이지를 한 번 띄운다(JS confirm 대체).
+function dangerForm(token: string, to: 'on' | 'off', back: string, label: string): string {
+  return `<form method="post" action="/lite/danger" class="inline">
+  <input type="hidden" name="token" value="${esc(token)}">
+  <input type="hidden" name="to" value="${to}">
+  <input type="hidden" name="back" value="${esc(back)}">
+  <button class="btn" type="submit">${esc(label)}</button>
+</form>`;
+}
+
+// 위험 모드 켜기 확인 페이지 (JS 없는 환경에서 실수 방지용 한 단계).
+function dangerConfirmPage(token: string, back: string): string {
+  return page(
+    '위험 모드 켜기',
+    `<div class="bar"><h1>⚠ 위험 모드 켜기</h1></div>
+<p>모든 도구가 폰 승인 없이 <b>자동 실행</b>됩니다.<br>
+AskUserQuestion(방향 결정)만 폰으로 질문합니다.<br>정말 켤까요?</p>
+<form method="post" action="/lite/danger">
+  <input type="hidden" name="token" value="${esc(token)}">
+  <input type="hidden" name="to" value="on">
+  <input type="hidden" name="confirm" value="1">
+  <input type="hidden" name="back" value="${esc(back)}">
+  <p><button class="btn btn-big" type="submit">⚠ 켭니다</button></p>
+</form>
+<p><a class="btn" href="${liteBackUrl(back, token)}">취소</a></p>`,
+  );
+}
+
+// back('dashboard' 또는 세션 id)을 돌아갈 URL 로 바꾼다.
+function liteBackUrl(back: string, token: string): string {
+  return back && back !== 'dashboard'
+    ? liteUrl('/lite/session', { token, id: back })
+    : liteUrl('/lite', { token });
 }
 
 function notFoundPage(token: string): string {
