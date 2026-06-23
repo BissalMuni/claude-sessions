@@ -29,6 +29,9 @@ export class SessionManager {
 
   // 세션 변경 1건: 폰에 broadcast + 디스크에 영속(디바운스). 모든 세션이 공유.
   private readonly onSessionUpdate = (view: SessionView): void => {
+    // 이미 제거된 세션의 뒤늦은 업데이트는 무시한다(삭제 후 부활 방지의 2차 방어선).
+    // 살아있는 세션은 항상 맵에 있으므로 정상 업데이트는 통과한다.
+    if (!this.sessions.has(view.id)) return;
     this.broadcast({ type: 'session_update', session: view });
     saveSession(view);
   };

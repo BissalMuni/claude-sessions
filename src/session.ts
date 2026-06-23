@@ -97,6 +97,9 @@ export class Session {
   private stalled = false;
   // broadcast 를 read loop 밖으로 빼기 위한 coalescing 플래그.
   private emitScheduled = false;
+  // 종료(stop) 후 플래그. abort 로 인한 뒤늦은 emit/save 가 삭제된 세션을
+  // 되살리는 것을 막는다 (삭제 후 부활 방지).
+  private stopped = false;
 
   private inputQueue = new AsyncQueue<SDKUserMessage>();
   private abort = new AbortController();
@@ -205,6 +208,9 @@ export class Session {
         this.handleMessage(msg);
       }
     } catch (err) {
+      // 의도적 종료(stop→abort)로 인한 throw 는 에러로 표시하지 않는다.
+      // (에러 상태로 두면 touch→emit 이 삭제된 세션을 다시 저장/브로드캐스트한다)
+      if (this.stopped) return;
       this.error = err instanceof Error ? err.message : String(err);
       this.addItem('error', this.error);
       this.setStatus('error');
@@ -308,6 +314,7 @@ export class Session {
 
   /** 세션을 완전히 종료하고 자원 정리 */
   stop(): void {
+    this.stopped = true; // 이후 어떤 emit/save 도 막는다 → 삭제 후 부활 방지
     rejectSessionPermissions(this.id);
     this.inputQueue.close();
     this.abort.abort();
@@ -339,10 +346,13 @@ export class Session {
   // write 에서 막혀 stall 됐다. setImmediate 로 미뤄 한 tick 의 변경들을 1번으로 합치고,
   // 루프는 즉시 다음 메시지를 읽어 파이프를 비운다.
   private scheduleEmit(): void {
+    if (this.stopped) return; // 종료된 세션은 더 이상 emit/save 하지 않는다
     if (this.emitScheduled) return;
     this.emitScheduled = true;
     setImmediate(() => {
       this.emitScheduled = false;
+      // stop() 직전 이미 예약돼 있던 emit 이 종료 후 터지는 경우도 막는다.
+      if (this.stopped) return;
       this.onUpdate(this.view());
     });
   }
