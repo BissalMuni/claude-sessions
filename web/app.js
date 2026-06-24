@@ -141,14 +141,6 @@ async function resetSession(s) {
     selectSession(d.session.id); // 새 세션으로 이동
   } catch (e) { showErr(e); }
 }
-$('logout-btn').onclick = () => {
-  localStorage.removeItem('sm_token');
-  state.token = '';
-  if (state.ws) state.ws.close();
-  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
-  showGate('');
-};
-
 // ---------- API ----------
 async function api(method, path, body) {
   const res = await fetch('/api' + path, {

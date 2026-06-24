@@ -89,11 +89,13 @@ input, textarea {
   display: flex; align-items: center; gap: 6px; padding: 8px 10px;
   border-bottom: 1px solid var(--line); background: var(--panel);
 }
-/* 상단 관리버튼 6개를 한 줄에 균등 배치 — 박스/글자 패딩을 줄여 좁은 폰에서도 안 넘침 */
+/* 상단 관리버튼을 한 줄에 균등 배치 — 박스/글자 패딩을 줄여 좁은 폰에서도 안 넘침 */
 .tb-btn {
   flex: 1 1 0; min-width: 0; padding: 8px 4px; font-size: 14px;
   text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* New(새 세션) 버튼은 목록 화면에서만 보인다(세션 상세 = body.viewing 일 땐 숨김) */
+body.viewing #new-btn { display: none; }
 .layout { flex: 1; display: flex; min-height: 0; }
 .list { width: 240px; border-right: 1px solid var(--line); overflow-y: auto; flex: none; background: var(--panel); }
 .detail { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -218,7 +220,8 @@ input, textarea {
 /* 새로고침: 나란히 6버튼 중 기호 버튼 — 좁게, 회전 기호 크게 */
 .qa-btn.qa-refresh { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; font-size: 18px; }
 /* 위험 모드 ON/OFF 토글: ON=빨강(자동 실행 경고), OFF=초록(안전) */
-.qa-btn.qa-danger { flex: 1 1 0; min-width: 0; font-weight: 700; border-width: 1px; }
+/* 위험 버튼은 다른 flex:1 버튼의 절반 폭 — 나머지 버튼이 남는 공간을 균등 분배 */
+.qa-btn.qa-danger { flex: 0.5 1 0; min-width: 0; font-weight: 700; border-width: 1px; }
 .qa-btn.qa-danger.on  { background: rgba(239,68,68,.18);  color: #fca5a5; border-color: var(--red); }
 .qa-btn.qa-danger.off { background: rgba(34,197,94,.16); color: #86efac; border-color: var(--green); }
 .qa-btn.qa-danger:active { filter: brightness(1.25); }
@@ -265,7 +268,7 @@ input, textarea {
   body.viewing .detail { display: flex; }
   .back-btn { display: inline-block; }  /* 상세에서 목록으로 돌아가는 버튼 */
 
-  /* 관리버튼 6개는 균등(flex:1)·축소(min-width:0)라 한 줄에 들어감 → 줄바꿈 금지 */
+  /* 관리버튼들은 균등(flex:1)·축소(min-width:0)라 한 줄에 들어감 → 줄바꿈 금지 */
   .topbar { flex-wrap: nowrap; gap: 5px; padding: 8px; }
   .composer textarea { height: 52px; }
 }
