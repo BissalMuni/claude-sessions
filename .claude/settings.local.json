@@ -10,7 +10,11 @@
       "PowerShell($paths = @\\(\"C:\\\\Program Files\\\\Tailscale\\\\tailscale.exe\", \"C:\\\\Program Files \\(x86\\)\\\\Tailscale\\\\tailscale.exe\"\\); foreach \\($p in $paths\\) { if \\(Test-Path $p\\) { Write-Output \"Found: $p\" } })",
       "PowerShell(tailscale status *)",
       "PowerShell(tailscale netcheck *)",
-      "PowerShell(Get-NetFirewallProfile *)"
+      "PowerShell(Get-NetFirewallProfile *)",
+      "Bash(npx tsc *)",
+      "Bash(echo \"exit: $?\")",
+      "Bash(timeout 10 node node_modules/tsx/dist/cli.mjs src/server.ts)",
+      "Bash(tasklist)"
     ]
   }
 }
