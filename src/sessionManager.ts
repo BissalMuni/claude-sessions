@@ -36,7 +36,12 @@ export class SessionManager {
     saveSession(view);
   };
 
-  /** 서버 부팅 시 저장된 세션들을 SDK resume 으로 되살린다. 복원 개수 반환. */
+  /**
+   * 서버 부팅 시 저장된 세션들을 복원한다. 단, SDK 서브프로세스는 즉시 띄우지 않는다(지연 복원).
+   * 기록만 '대기' 상태로 올려두고, 사용자가 그 세션에 프롬프트를 보낼 때 resume 한다.
+   * (24개를 동시에 띄우면 .claude.json 충돌·메모리 고갈로 전부 '오류'가 되던 문제 방지.)
+   * 복원 개수 반환.
+   */
   restore(): number {
     const records = loadPersistedSessions();
     for (const rec of records) {
@@ -50,9 +55,10 @@ export class SessionManager {
         initialMessages: rec.messages,
         createdAt: rec.createdAt,
         updatedAt: rec.updatedAt,
+        lazy: true, // 첫 사용 시점까지 SDK 기동을 미룬다
       });
       this.sessions.set(rec.id, session);
-      session.start();
+      // start() 하지 않는다 — sendPrompt 시 Session 이 알아서 ensureStarted().
     }
     return records.length;
   }
@@ -96,6 +102,14 @@ export class SessionManager {
     return resolveQuestion(requestId, answers);
   }
 
+  /** 수동 컴팩션 (폰 CPT 버튼) — 해당 세션 컨텍스트를 지금 압축 */
+  compact(id: string): boolean {
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    session.compact();
+    return true;
+  }
+
   /** 진행 중인 턴 중단 */
   async interrupt(id: string): Promise<boolean> {
     const session = this.sessions.get(id);
@@ -133,6 +147,20 @@ export class SessionManager {
 
   list(): SessionView[] {
     return [...this.sessions.values()].map((s) => s.view());
+  }
+
+  /**
+   * 목록 표시용 세션들. 같은 폴더(cwd)는 가장 최근(updatedAt) 세션 하나만 남긴다.
+   * 나머지 지난(종료된) 중복 세션은 기록(store)은 보존하되 목록에서만 숨긴다.
+   * 화면 표시 전용 필터이므로 list()/저장소는 그대로 두고 여기서만 거른다.
+   */
+  listVisible(): SessionView[] {
+    const latest = new Map<string, SessionView>();
+    for (const v of this.list()) {
+      const cur = latest.get(v.cwd);
+      if (!cur || v.updatedAt.localeCompare(cur.updatedAt) > 0) latest.set(v.cwd, v);
+    }
+    return [...latest.values()];
   }
 
   /** 프로세스 종료 시 전체 정리 */

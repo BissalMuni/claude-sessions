@@ -168,6 +168,14 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ ok: true });
   });
 
+  // 수동 컴팩션 (CPT 버튼) — 컨텍스트를 지금 압축해 토큰 재독 비용을 줄인다
+  router.post('/sessions/:id/compact', (req, res) => {
+    if (!manager.compact(req.params.id)) {
+      return res.status(404).json({ error: 'not found' });
+    }
+    res.json({ ok: true });
+  });
+
   // 진행 중 턴 중단
   router.post('/sessions/:id/interrupt', async (req, res) => {
     if (!(await manager.interrupt(req.params.id))) {

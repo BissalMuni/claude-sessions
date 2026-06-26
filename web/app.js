@@ -256,9 +256,20 @@ function render() {
   }
 }
 
+// 같은 폴더(cwd)는 가장 최근(updatedAt) 대화 하나만 목록에 띄운다.
+// 나머지 지난(종료된) 중복 세션은 기록은 남기되 목록에서만 숨긴다(표시 전용 필터).
+function latestPerFolder(sessions) {
+  const latest = new Map();
+  for (const s of sessions) {
+    const cur = latest.get(s.cwd);
+    if (!cur || s.updatedAt.localeCompare(cur.updatedAt) > 0) latest.set(s.cwd, s);
+  }
+  return [...latest.values()];
+}
+
 function renderList() {
   const list = $('list');
-  const sessions = [...state.sessions.values()].sort(byImportance);
+  const sessions = latestPerFolder([...state.sessions.values()]).sort(byImportance);
   list.innerHTML = '';
   for (const s of sessions) {
     const el = document.createElement('div');
@@ -311,6 +322,7 @@ function renderDetail() {
         <button class="qa-btn qa-nav" id="qa-prev" title="이전 프로젝트">◀</button>
         <button class="qa-btn qa-nav" id="qa-next" title="다음 프로젝트">▶</button>
         <button class="qa-btn qa-refresh" id="qa-refresh" title="새로고침(다시 연결/동기화)">⟳</button>
+        <button class="qa-btn qa-compact" id="qa-compact" title="컨텍스트 압축(/compact) — 이전 대화를 요약해 토큰 재독 비용을 줄임">CPT</button>
         <button class="qa-btn qa-danger ${state.danger ? 'on' : 'off'}" id="qa-danger"
           title="위험 모드: 켜면 모든 도구를 묻지 않고 자동 실행(AskUserQuestion만 폰 질문)">
           ${state.danger ? '위험 ON' : '안전 OFF'}</button>
@@ -417,6 +429,11 @@ function renderDetail() {
   $('qa-next').onclick = () => navProject(1);
   // 새로고침: 페이지를 다시 불러와 WS 재연결 + 최신 스냅샷 수신
   $('qa-refresh').onclick = () => location.reload();
+  // CPT: 이 세션 컨텍스트를 지금 압축(/compact)
+  $('qa-compact').onclick = () => {
+    if (!confirm('이 세션의 이전 대화를 지금 압축할까요?\n(요약본으로 줄여 토큰 재독 비용을 낮춥니다)')) return;
+    api('POST', `/sessions/${s.id}/compact`).catch(showErr);
+  };
   // 위험 모드 ON/OFF 토글: 서버에 반영 → danger 이벤트로 모든 기기 동기화
   $('qa-danger').onclick = () => toggleDanger();
 

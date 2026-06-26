@@ -51,6 +51,24 @@ function buildSystemAppend(): string {
   return isDanger() ? `${CONSTITUTION}\n${DANGER_NOTE}` : CONSTITUTION;
 }
 
+// 자동 컴팩션 임계값(토큰). 기본 ~190k(한도의 95%)는 너무 늦어, 컨텍스트가 200k까지
+// 차오르며 매 턴 그 전체를 다시 읽어 토큰이 폭발했다. 이 값을 낮추면 SDK 가 일찍 압축한다.
+// 특히 복원(resume)된 큰 세션은 첫 턴에서 이 임계값을 넘으므로 곧바로 자동 컴팩션된다.
+// SDK 스키마 허용 범위는 100_000~1_000_000. 그 밖의 값은 안전하게 클램프한다.
+const COMPACT_WINDOW = Math.min(
+  1_000_000,
+  Math.max(100_000, Number(process.env.SCREEN_COMPACT_WINDOW) || 100_000),
+);
+
+// 모든 세션이 공유하는 '시작 직렬화' 게이트.
+// Claude Code SDK 서브프로세스는 부팅 시 공유 파일 ~/.claude.json 을 읽고 다시 쓴다.
+// 여러 개가 동시에 뜨면 그 쓰기가 경쟁해 파일이 깨지고(JSON 손상) 그 뒤 뜨는 것들이 전부 죽었다.
+// 그래서 '한 번에 하나씩' 시작한다: 앞선 서브프로세스가 init(=설정 쓰기 완료)까지 올라온 뒤
+// (또는 안전 타임아웃 후) 다음 세션의 query() 를 띄운다. 이 체인이 그 순번을 보장한다.
+let startChain: Promise<void> = Promise.resolve();
+// 앞 세션이 init 도 못 받고 매달릴 때 뒤 세션들이 영영 막히지 않도록 하는 안전 타임아웃(ms).
+const START_SETTLE_MS = Number(process.env.SCREEN_START_SETTLE_MS) || 2_500;
+
 // 이 시간(ms)보다 오래 SDK 가 무응답이면 '정체?'로 표시한다. 끊지 않는다 — 보여주기만.
 const STALL_HINT_MS = Number(process.env.STALL_HINT_MS) || 90_000;
 // SDK 서브프로세스 stderr/디버그 로그를 세션별로 남길 디렉터리
@@ -74,6 +92,12 @@ export interface SessionOpts {
   /** 복원용: 원래 생성/갱신 시각 (없으면 now) */
   createdAt?: string;
   updatedAt?: string;
+  /**
+   * 지연 복원: true 면 생성만 하고 SDK 서브프로세스는 띄우지 않는다(상태 '대기').
+   * 첫 프롬프트/중단 등 실제 사용 시점에 start() 된다. 재기동 시 24개를 동시에 띄워
+   * .claude.json 충돌·메모리 고갈로 전부 '오류'가 되던 문제를 막기 위함.
+   */
+  lazy?: boolean;
 }
 
 /** 하나의 Claude Agent SDK 세션 = 작업 한 줄기 */
@@ -104,6 +128,12 @@ export class Session {
   private inputQueue = new AsyncQueue<SDKUserMessage>();
   private abort = new AbortController();
   private run: Query | null = null;
+  // SDK query 루프가 떴는지. 지연 복원 세션은 false 로 시작해 첫 사용 때 start() 된다.
+  private started = false;
+  // 시작 직렬화 게이트의 resolver. init(또는 타임아웃/오류) 때 호출돼 다음 세션 시작을 풀어준다.
+  private startSettled: (() => void) | null = null;
+  // 자동 컴팩션 임계값을 한 번만 적용하기 위한 가드 (init 은 컴팩션마다 다시 옴).
+  private compactionApplied = false;
 
   constructor(opts: SessionOpts) {
     this.id = opts.id;
@@ -115,10 +145,27 @@ export class Session {
     this.messages = opts.initialMessages ? [...opts.initialMessages] : [];
     this.createdAt = opts.createdAt ?? new Date().toISOString();
     this.updatedAt = opts.updatedAt ?? this.createdAt;
+    // 지연 복원 세션은 SDK 가 아직 없으니 '시작중'이 아니라 '대기'로 보여준다.
+    if (opts.lazy) this.status = 'idle';
   }
 
-  /** SDK query 루프를 시작한다 */
+  /**
+   * SDK query 루프를 시작한다 (지연 복원 세션은 첫 사용 때 호출됨). 중복 호출은 무시.
+   * 실제 query() 기동은 공유 startChain 에 줄을 세워 '한 번에 하나씩' 직렬로 띄운다
+   * (동시 시작 시 ~/.claude.json 쓰기 경쟁으로 파일이 깨지는 것 방지). 큐 대기 중에는
+   * inputQueue 가 프롬프트를 버퍼링하므로, 시작 전에 보낸 명령도 유실되지 않는다.
+   */
   start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.setStatus('starting'); // 게이트 대기 중에도 '시작중'으로 보여준다
+    // 앞선 시작이 자리(init)를 잡은 뒤에 내 query() 를 띄운다. catch 로 체인이 끊기지 않게.
+    startChain = startChain.then(() => this.startNow()).catch(() => {});
+  }
+
+  /** 실제 query() 기동. startChain 이 풀어줄 때 호출되며, init/타임아웃까지 기다리는 Promise 반환. */
+  private startNow(): Promise<void> {
+    if (this.stopped) return Promise.resolve(); // 줄 서 있는 동안 종료됐으면 띄우지 않는다
     this.run = query({
       prompt: this.inputQueue,
       options: {
@@ -198,6 +245,22 @@ export class Session {
     });
 
     void this.consume();
+
+    // 이 서브프로세스가 init(=설정 파일 쓰기 완료)까지 올라오면 게이트를 풀어 다음 세션을 시작시킨다.
+    // init 이 안 오고 매달리는 경우를 대비해 안전 타임아웃도 건다. 둘 중 먼저 오는 쪽이 풀어준다.
+    return new Promise<void>((resolve) => {
+      this.startSettled = resolve;
+      setTimeout(() => this.settleStart(), START_SETTLE_MS);
+    });
+  }
+
+  /** 시작 게이트를 한 번만 풀어준다 (init / 타임아웃 / 오류 중 가장 먼저 온 신호). */
+  private settleStart(): void {
+    const resolve = this.startSettled;
+    if (resolve) {
+      this.startSettled = null;
+      resolve();
+    }
   }
 
   /** SDK 출력 스트림을 소비하며 상태/메시지를 갱신 */
@@ -208,6 +271,8 @@ export class Session {
         this.handleMessage(msg);
       }
     } catch (err) {
+      // 시작 직후 죽었더라도 게이트를 풀어 다음 세션이 막히지 않게 한다.
+      this.settleStart();
       // 의도적 종료(stop→abort)로 인한 throw 는 에러로 표시하지 않는다.
       // (에러 상태로 두면 touch→emit 이 삭제된 세션을 다시 저장/브로드캐스트한다)
       if (this.stopped) return;
@@ -220,12 +285,39 @@ export class Session {
   private handleMessage(msg: SDKMessage): void {
     this.markActivity(); // SDK 가 살아있다는 신호 → stall 시계 리셋
     switch (msg.type) {
-      case 'system':
-        if (msg.subtype === 'init') {
+      case 'system': {
+        const sm = msg as Record<string, unknown>;
+        if (sm.subtype === 'init') {
           this.sdkSessionId = msg.session_id;
           if (this.status === 'starting') this.setStatus('idle');
+          // 설정 파일(~/.claude.json) 쓰기가 끝난 시점 → 시작 게이트를 풀어 다음 세션을 시작시킨다.
+          this.settleStart();
+          // 컨트롤 채널이 열린 직후(init) 자동 컴팩션 임계값을 낮춘다.
+          // 복원된 큰 세션은 다음 턴에서 이 임계값을 넘어 곧바로 압축된다.
+          // init 은 컴팩션 직후에도 다시 오므로, 한 번만 적용되게 가드.
+          if (!this.compactionApplied) {
+            this.compactionApplied = true;
+            void this.applyCompactionSettings();
+          }
+        } else if (sm.subtype === 'compact_boundary') {
+          // 자동 컴팩션 경로(autoCompactWindow)에서 오는 신호. pre/post 토큰으로 표시.
+          const meta = sm.compact_metadata as { trigger?: string; pre_tokens?: number; post_tokens?: number } | undefined;
+          const pre = meta?.pre_tokens != null ? Math.round(meta.pre_tokens / 1000) + 'k' : '?';
+          const post = meta?.post_tokens != null ? Math.round(meta.post_tokens / 1000) + 'k' : '?';
+          const how = meta?.trigger === 'manual' ? '수동' : '자동';
+          this.addItem('system', `🗜 컨텍스트 압축됨(${how}): ${pre} → ${post}`);
+        } else if (sm.subtype === 'status') {
+          // 수동 /compact 경로 신호: 'compacting' 시작 → compact_result(success|failed).
+          if (sm.status === 'compacting') {
+            this.addItem('system', '🗜 컨텍스트 압축 중…');
+          } else if (sm.compact_result === 'success') {
+            this.addItem('system', '🗜 컨텍스트 압축 완료');
+          } else if (sm.compact_result === 'failed') {
+            this.addItem('system', `🗜 압축 건너뜀: ${String(sm.compact_error ?? '알 수 없음')}`);
+          }
         }
         break;
+      }
 
       case 'assistant': {
         const blocks = (msg.message.content ?? []) as unknown as Array<Record<string, unknown>>;
@@ -275,9 +367,16 @@ export class Session {
     }
   }
 
+  /** 지연 복원 세션을 처음 쓸 때 SDK 를 띄운다. 이미 떠 있으면 무시. */
+  ensureStarted(): void {
+    if (!this.started) this.start();
+  }
+
   /** 폰이 보낸 새 명령을 세션에 주입 (텍스트 + 선택적 이미지) */
   sendPrompt(text: string, images: InputImage[] = []): void {
     if (this.status === 'error') return;
+    // 지연 복원 세션이면 이 시점에 SDK 를 띄운다(resume). 큐는 시작 전 push 도 버퍼링한다.
+    this.ensureStarted();
     const suffix = images.length ? ` [🖼 이미지 ${images.length}장]` : '';
     this.addItem('user', (text || '(이미지)') + suffix);
 
@@ -303,6 +402,34 @@ export class Session {
     this.setStatus('thinking');
   }
 
+  /** 자동 컴팩션 임계값을 낮춰 컨텍스트 폭주를 막는다. 실패해도 세션은 계속(최적화일 뿐). */
+  private async applyCompactionSettings(): Promise<void> {
+    try {
+      // Settings 키(autoCompactEnabled/autoCompactWindow)를 런타임 설정 레이어에 병합.
+      await this.run?.applyFlagSettings({
+        autoCompactEnabled: true,
+        autoCompactWindow: COMPACT_WINDOW,
+      } as Record<string, unknown>);
+    } catch {
+      /* 컴팩션 설정 실패가 세션을 죽이면 안 된다 */
+    }
+  }
+
+  /** 폰의 CPT 버튼 → 지금 즉시 수동 컴팩션. /compact 를 입력 스트림에 넣어 압축을 건다. */
+  compact(): void {
+    if (this.status === 'error') return;
+    this.ensureStarted(); // 지연 복원 세션이면 먼저 SDK 기동
+    this.addItem('user', '/compact (컨텍스트 압축 요청)');
+    this.inputQueue.push({
+      type: 'user',
+      message: { role: 'user', content: '/compact' as never },
+      parent_tool_use_id: null,
+    });
+    this.lastActivityAt = Date.now();
+    this.stalled = false;
+    this.setStatus('thinking');
+  }
+
   /** 진행 중인 턴을 중단 */
   async interrupt(): Promise<void> {
     try {
@@ -315,6 +442,7 @@ export class Session {
   /** 세션을 완전히 종료하고 자원 정리 */
   stop(): void {
     this.stopped = true; // 이후 어떤 emit/save 도 막는다 → 삭제 후 부활 방지
+    this.settleStart(); // 시작 게이트에서 대기 중이었다면 풀어 다음 세션을 막지 않는다
     rejectSessionPermissions(this.id);
     this.inputQueue.close();
     this.abort.abort();

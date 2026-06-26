@@ -217,8 +217,11 @@ body.viewing #new-btn { display: none; }
 }
 .qa-btn:active { background: var(--line); }
 .qa-btn.qa-nav { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; }
-/* 새로고침: 나란히 6버튼 중 기호 버튼 — 좁게, 회전 기호 크게 */
+/* 새로고침: 기호 버튼 — 좁게, 회전 기호 크게 */
 .qa-btn.qa-refresh { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; font-size: 18px; }
+/* CPT(컴팩션): 위험 버튼 앞 보조 버튼 — 강조색 테두리로 구분 */
+.qa-btn.qa-compact { flex: 0 0 auto; min-width: 44px; color: var(--accent); border-color: var(--accent); font-weight: 700; font-size: 13px; }
+.qa-btn.qa-compact:active { background: rgba(59,130,246,.18); }
 /* 위험 모드 ON/OFF 토글: ON=빨강(자동 실행 경고), OFF=초록(안전) */
 /* 위험 버튼은 다른 flex:1 버튼의 절반 폭 — 나머지 버튼이 남는 공간을 균등 분배 */
 .qa-btn.qa-danger { flex: 0.5 1 0; min-width: 0; font-weight: 700; border-width: 1px; }

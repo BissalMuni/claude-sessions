@@ -52,7 +52,7 @@ export function createLiteRouter(manager: SessionManager): Router {
   // 로그인 페이지
   router.get('/', (req, res) => {
     if (!authed(req)) return res.send(loginPage());
-    res.send(dashboardPage(manager.list(), TOKEN, manager.isDanger()));
+    res.send(dashboardPage(manager.listVisible(), TOKEN, manager.isDanger()));
   });
 
   // 세션 상세
@@ -63,7 +63,7 @@ export function createLiteRouter(manager: SessionManager): Router {
     if (!view) return res.send(notFoundPage(TOKEN));
     // 대시보드와 같은 중요도순으로 정렬해 '다음' 세션(프로젝트) id 를 계산.
     // 맨 끝에서는 처음으로 순환(wrap-around) → '다음'은 항상 다음 프로젝트 상세로 바로 연결된다.
-    const ordered = [...manager.list()].sort(byImportance);
+    const ordered = [...manager.listVisible()].sort(byImportance);
     const idx = ordered.findIndex((x) => x.id === id);
     const nextId = idx >= 0 && ordered.length > 1 ? ordered[(idx + 1) % ordered.length].id : null;
     res.send(detailPage(view, TOKEN, nextId, manager.isDanger()));
@@ -133,6 +133,14 @@ export function createLiteRouter(manager: SessionManager): Router {
     if (!authed(req)) return res.send(loginPage());
     const id = String(req.body.id || '');
     void manager.interrupt(id);
+    res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
+  });
+
+  // 수동 컴팩션 (CPT) — 이 세션 컨텍스트를 지금 압축해 토큰 재독 비용을 줄인다
+  router.post('/compact', (req, res) => {
+    if (!authed(req)) return res.send(loginPage());
+    const id = String(req.body.id || '');
+    manager.compact(id);
     res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
   });
 
@@ -295,6 +303,7 @@ function detailPage(s: SessionView, token: string, nextId: string | null | undef
   <p class="ctrls">
     <a class="btn" href="${liteUrl('/lite', { token })}">◀ 목록</a>
     <a class="btn" href="${liteUrl('/lite/session', { token, id: s.id })}">↻ 새로고침</a>
+    ${compactForm(token, s.id)}
     ${dangerToggle(token, danger, s.id)}
   </p>
 </div>
@@ -442,6 +451,15 @@ function dangerToggle(token: string, danger: boolean, back: string): string {
   return danger
     ? dangerForm(token, 'off', back, '⚠ 위험 ON (끄기)')
     : dangerForm(token, 'on', back, '🔒 안전 (위험 켜기)');
+}
+
+// 수동 컴팩션(CPT) 폼 1개. 누르면 즉시 /compact 를 세션에 주입해 컨텍스트를 압축한다.
+function compactForm(token: string, id: string): string {
+  return `<form method="post" action="/lite/compact" class="inline">
+  <input type="hidden" name="token" value="${esc(token)}">
+  <input type="hidden" name="id" value="${esc(id)}">
+  <button class="btn" type="submit" title="컨텍스트 압축">🗜 압축</button>
+</form>`;
 }
 
 // 위험 모드 토글 폼 1개. to='on' 이면 서버가 확인 페이지를 한 번 띄운다(JS confirm 대체).
