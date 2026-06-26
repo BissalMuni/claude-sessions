@@ -9,9 +9,14 @@ REM set "STALL_TIMEOUT_MS=720000"
 
 REM pnpm 11's pre-run check aborts on esbuild's blocked build script,
 REM so launch the server directly via tsx (same as "pnpm start").
+REM
+REM Auto-restart loop: an agent session (danger mode) can run "taskkill /IM node.exe"
+REM to clean up its own dev server, which also kills THIS controller (also node.exe).
+REM This cmd.exe window is NOT node, so it survives and relaunches the server.
+REM To quit for real: press Ctrl+C and answer Y, or just close this window.
+:loop
 node "node_modules\tsx\dist\cli.mjs" src\server.ts
-
-REM Keep the window open after the server stops (for reading errors).
 echo.
-echo [Server stopped. Press any key to close this window.]
-pause >nul
+echo [Server stopped at %date% %time% - restarting in 3s... Ctrl+C to quit]
+timeout /t 3 /nobreak >nul
+goto loop
