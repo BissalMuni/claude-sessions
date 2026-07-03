@@ -35,7 +35,21 @@ function logServer(kind: string, detail: unknown): void {
   }
   console.error(line.trimEnd());
 }
-process.on('uncaughtException', (err) => logServer('uncaughtException', err));
+// 포트 충돌(EADDRINUSE)은 '이미 다른 서버 인스턴스가 8787 을 물고 있다'는 뜻 —
+// 이중 실행이다. 이 중복 인스턴스는 어정쩡하게 살려두면 안 되고(리슨 못 하는 좀비),
+// 명확한 안내와 함께 '재시작 금지' 코드(88)로 즉시 종료한다. .bat 루프가 이 코드를
+// 보고 재시작하지 않는다(정상 인스턴스와 무한 충돌하는 것 방지).
+const EXIT_PORT_BUSY = 88;
+function handleBindError(err: unknown): boolean {
+  if ((err as { code?: string })?.code !== 'EADDRINUSE') return false;
+  logServer('EADDRINUSE', `포트 ${PORT} 이미 사용 중 — 다른 서버 인스턴스가 이미 실행 중. 이 창은 종료(중복 실행).`);
+  console.error(`\n⚠ 포트 ${PORT} 을 이미 다른 서버가 쓰고 있습니다(이중 실행). 이 창을 닫으세요. 서버는 다른 창에서 정상 동작 중입니다.`);
+  process.exit(EXIT_PORT_BUSY);
+}
+process.on('uncaughtException', (err) => {
+  if (handleBindError(err)) return; // EADDRINUSE 는 위에서 종료 처리
+  logServer('uncaughtException', err);
+});
 process.on('unhandledRejection', (reason) => logServer('unhandledRejection', reason));
 // '조용한 종료' 추적용: 이벤트 루프가 비어 정상 종료되려 할 때 / 실제 종료 코드.
 // 서버 소켓이 살아있으면 beforeExit 는 안 떠야 정상 — 뜨면 그게 곧 단서다.
@@ -54,14 +68,27 @@ app.use(express.urlencoded({ extended: false, limit: '1mb' })); // lite UI 폼 �
 app.use('/lite', createLiteRouter(manager));
 
 // 최신 기기용 SPA (정적). 토큰은 UI 안에서 입력받아 API/WS 호출에 붙인다.
-app.use('/', express.static(join(__dirname, '..', 'web')));
+// html/js/css 는 항상 재검증(no-cache): 폰·e-ink 브라우저가 옛 app.js 를 캐시해
+// 새 UI 기능(예: 마크다운 표 렌더)이 반영 안 되던 문제 예방. ETag 로 미변경 시 304.
+app.use(
+  '/',
+  express.static(join(__dirname, '..', 'web'), {
+    setHeaders: (res, filePath) => {
+      if (/\.(html|js|css)$/.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
+    },
+  }),
+);
 
 app.use('/api', createApiRouter(manager));
 
 const server = createServer(app);
 // listen 실패(EADDRINUSE 등)는 server 의 'error' 이벤트로 온다. 핸들러가 없으면
-// 그 에러가 그대로 throw 되어 서버가 죽는다. 잡아서 로그로 남긴다.
-server.on('error', (err) => logServer('server', err));
+// 그 에러가 그대로 throw 되어 서버가 죽는다. EADDRINUSE 면 중복 실행이니 깔끔히 종료,
+// 그 외는 로그만 남긴다.
+server.on('error', (err) => {
+  if (handleBindError(err)) return;
+  logServer('server', err);
+});
 attachWebSocket(server, manager);
 
 server.listen(PORT, HOST, () => {

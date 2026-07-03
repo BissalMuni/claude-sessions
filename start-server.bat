@@ -16,7 +16,18 @@ REM This cmd.exe window is NOT node, so it survives and relaunches the server.
 REM To quit for real: press Ctrl+C and answer Y, or just close this window.
 :loop
 node "node_modules\tsx\dist\cli.mjs" src\server.ts
+
+REM Exit code 88 = port already in use (another server instance is already running).
+REM Do NOT restart in that case, or this window would fight the healthy instance forever.
+if errorlevel 88 goto dup
+
 echo.
 echo [Server stopped at %date% %time% - restarting in 3s... Ctrl+C to quit]
 timeout /t 3 /nobreak >nul
 goto loop
+
+:dup
+echo.
+echo [Port 8787 already in use - another server window is already running.]
+echo [Close this window. The server is fine in the other window.]
+pause >nul
