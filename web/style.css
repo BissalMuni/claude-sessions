@@ -223,8 +223,16 @@ body.viewing #new-btn { display: none; }
 .qa-btn.qa-compact { flex: 0 0 auto; min-width: 44px; color: var(--accent); border-color: var(--accent); font-weight: 700; font-size: 13px; }
 .qa-btn.qa-compact:active { background: rgba(59,130,246,.18); }
 /* 위험 모드 ON/OFF 토글: ON=빨강(자동 실행 경고), OFF=초록(안전) */
-/* 위험 버튼은 다른 flex:1 버튼의 절반 폭 — 나머지 버튼이 남는 공간을 균등 분배 */
-.qa-btn.qa-danger { flex: 0.5 1 0; min-width: 0; font-weight: 700; border-width: 1px; }
+/* 위험 버튼: 라벨을 2줄(위험/ON)로 쪼개고 폰트를 줄여 너비는 최소, 높이는 다른 버튼과 동일 */
+.qa-btn.qa-danger {
+  flex: 0 0 auto;
+  min-width: 45px;
+  padding: 3px 6px;
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 700;
+  border-width: 2px;
+}
 .qa-btn.qa-danger.on  { background: rgba(239,68,68,.18);  color: #fca5a5; border-color: var(--red); }
 .qa-btn.qa-danger.off { background: rgba(34,197,94,.16); color: #86efac; border-color: var(--green); }
 .qa-btn.qa-danger:active { filter: brightness(1.25); }

@@ -325,7 +325,7 @@ function renderDetail() {
         <button class="qa-btn qa-compact" id="qa-compact" title="컨텍스트 압축(/compact) — 이전 대화를 요약해 토큰 재독 비용을 줄임">CPT</button>
         <button class="qa-btn qa-danger ${state.danger ? 'on' : 'off'}" id="qa-danger"
           title="위험 모드: 켜면 모든 도구를 묻지 않고 자동 실행(AskUserQuestion만 폰 질문)">
-          ${state.danger ? '위험 ON' : '안전 OFF'}</button>
+          ${state.danger ? '위험<br>ON' : '안전<br>OFF'}</button>
       </div>
       <div class="thumbs" id="thumbs"></div>
       <div class="files" id="files"></div>
