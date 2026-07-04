@@ -67,14 +67,21 @@ const COMPACT_WINDOW = Math.min(
   Math.max(100_000, Number(process.env.SCREEN_COMPACT_WINDOW) || 100_000),
 );
 
-// 모든 세션이 공유하는 '시작 직렬화' 게이트.
-// Claude Code SDK 서브프로세스는 부팅 시 공유 파일 ~/.claude.json 을 읽고 다시 쓴다.
-// 여러 개가 동시에 뜨면 그 쓰기가 경쟁해 파일이 깨지고(JSON 손상) 그 뒤 뜨는 것들이 전부 죽었다.
-// 그래서 '한 번에 하나씩' 시작한다: 앞선 서브프로세스가 init(=설정 쓰기 완료)까지 올라온 뒤
-// (또는 안전 타임아웃 후) 다음 세션의 query() 를 띄운다. 이 체인이 그 순번을 보장한다.
-let startChain: Promise<void> = Promise.resolve();
-// 앞 세션이 init 도 못 받고 매달릴 때 뒤 세션들이 영영 막히지 않도록 하는 안전 타임아웃(ms).
-const START_SETTLE_MS = Number(process.env.SCREEN_START_SETTLE_MS) || 2_500;
+// 모든 세션이 공유하는 '부팅 직렬화' 게이트.
+// Claude Code SDK 서브프로세스는 query() 를 만드는 순간이 아니라 "첫 사용자 입력"을
+// 받을 때 비로소 부팅하며, 그 과정에서 공유 파일 ~/.claude.json 을 읽고 다시 쓴다
+// (쓰기 완료 시점이 곧 system/init). 여러 세션이 거의 동시에 첫 프롬프트를 받으면 그
+// 쓰기가 경쟁해 파일이 깨지고(JSON 손상) 그 뒤 부팅하는 세션들이 전부 죽는다
+// (='같은 프로젝트 2개 이상 안 뜸'의 실제 원인).
+// 그래서 '한 번에 하나씩 부팅'한다: 앞 세션이 init(=쓰기 완료)까지 올라온 뒤(또는 안전
+// 백스톱 후) 다음 세션의 첫 프롬프트를 입력 큐에 흘려보낸다.
+// 핵심: 게이트는 query() '생성'이 아니라 '첫 프롬프트 부팅'에 건다. 실제 쓰기 경쟁이
+// 거기서 나기 때문. query() 는 입력이 없으면 서브프로세스를 안 띄우므로 즉시 만들어도 안전.
+let bootChain: Promise<void> = Promise.resolve();
+// 앞 세션이 init 을 못 받고 매달릴 때 뒤 세션들이 영영 막히지 않게 하는 안전 백스톱(ms).
+// 실측 init 도달은 ~8초라 예전 기본 2.5초는 너무 짧아 게이트가 새서 경쟁이 났다.
+// 정상 부팅은 init 이 일찍 풀어주므로 이 백스톱은 '진짜 매달린 부팅'에만 발동한다.
+const BOOT_SETTLE_MS = Number(process.env.SCREEN_START_SETTLE_MS) || 25_000;
 
 // 이 시간(ms)보다 오래 SDK 가 무응답이면 '정체?'로 표시한다. 끊지 않는다 — 보여주기만.
 const STALL_HINT_MS = Number(process.env.STALL_HINT_MS) || 90_000;
@@ -137,8 +144,13 @@ export class Session {
   private run: Query | null = null;
   // SDK query 루프가 떴는지. 지연 복원 세션은 false 로 시작해 첫 사용 때 start() 된다.
   private started = false;
-  // 시작 직렬화 게이트의 resolver. init(또는 타임아웃/오류) 때 호출돼 다음 세션 시작을 풀어준다.
-  private startSettled: (() => void) | null = null;
+  // 부팅 직렬화 상태.
+  // bootStarted: 첫 프롬프트로 부팅을 이미 시작했는지(이후 입력은 게이트 없이 바로 큐로).
+  // preBootBuffer: 부팅 락을 기다리는 동안 들어온 입력들(순서 보존용, 락이 풀리면 flush).
+  // releaseBoot: 내 부팅 락의 resolver. init/종료/백스톱 중 먼저 온 신호가 호출해 다음 세션을 푼다.
+  private bootStarted = false;
+  private preBootBuffer: SDKUserMessage[] = [];
+  private releaseBoot: (() => void) | null = null;
   // 자동 컴팩션 임계값을 한 번만 적용하기 위한 가드 (init 은 컴팩션마다 다시 옴).
   private compactionApplied = false;
 
@@ -158,21 +170,15 @@ export class Session {
 
   /**
    * SDK query 루프를 시작한다 (지연 복원 세션은 첫 사용 때 호출됨). 중복 호출은 무시.
-   * 실제 query() 기동은 공유 startChain 에 줄을 세워 '한 번에 하나씩' 직렬로 띄운다
-   * (동시 시작 시 ~/.claude.json 쓰기 경쟁으로 파일이 깨지는 것 방지). 큐 대기 중에는
-   * inputQueue 가 프롬프트를 버퍼링하므로, 시작 전에 보낸 명령도 유실되지 않는다.
+   * query() 는 즉시 만든다 — 입력이 없으면 서브프로세스를 띄우지 않으므로(따라서
+   * ~/.claude.json 도 안 건드리므로) 여러 개를 동시에 만들어도 안전하다.
+   * 실제 부팅(=쓰기 경쟁 지점)은 첫 프롬프트가 enqueue() → 부팅 게이트를 지나 입력 큐에
+   * 들어갈 때 비로소 시작되고, 그 게이트가 '한 번에 하나씩'을 보장한다.
    */
   start(): void {
     if (this.started) return;
     this.started = true;
-    this.setStatus('starting'); // 게이트 대기 중에도 '시작중'으로 보여준다
-    // 앞선 시작이 자리(init)를 잡은 뒤에 내 query() 를 띄운다. catch 로 체인이 끊기지 않게.
-    startChain = startChain.then(() => this.startNow()).catch(() => {});
-  }
-
-  /** 실제 query() 기동. startChain 이 풀어줄 때 호출되며, init/타임아웃까지 기다리는 Promise 반환. */
-  private startNow(): Promise<void> {
-    if (this.stopped) return Promise.resolve(); // 줄 서 있는 동안 종료됐으면 띄우지 않는다
+    if (this.stopped) return; // 이미 종료됐으면 띄우지 않는다
     this.run = query({
       prompt: this.inputQueue,
       options: {
@@ -252,21 +258,49 @@ export class Session {
     });
 
     void this.consume();
-
-    // 이 서브프로세스가 init(=설정 파일 쓰기 완료)까지 올라오면 게이트를 풀어 다음 세션을 시작시킨다.
-    // init 이 안 오고 매달리는 경우를 대비해 안전 타임아웃도 건다. 둘 중 먼저 오는 쪽이 풀어준다.
-    return new Promise<void>((resolve) => {
-      this.startSettled = resolve;
-      setTimeout(() => this.settleStart(), START_SETTLE_MS);
-    });
   }
 
-  /** 시작 게이트를 한 번만 풀어준다 (init / 타임아웃 / 오류 중 가장 먼저 온 신호). */
-  private settleStart(): void {
-    const resolve = this.startSettled;
-    if (resolve) {
-      this.startSettled = null;
-      resolve();
+  /**
+   * 세션에 입력을 넣는다. 첫 입력은 서브프로세스를 부팅(=.claude.json 쓰기)시키므로 전역
+   * bootChain 에 줄을 세워 '한 번에 하나씩' 부팅한다. 부팅 이후 입력은 게이트 없이 바로 큐로.
+   * 락 대기 중 들어온 입력은 preBootBuffer 에 순서대로 모았다가 락이 풀리면 함께 흘려보낸다.
+   */
+  private enqueue(msg: SDKUserMessage): void {
+    if (this.bootStarted) {
+      // 이미 부팅 시작(락 획득)됨 → 순서 보존하며 바로 입력 큐로.
+      this.inputQueue.push(msg);
+      return;
+    }
+    // 아직 부팅 전: 버퍼에 모은다. 첫 진입에서만 부팅 게이트를 건다(락은 세션당 한 번).
+    this.preBootBuffer.push(msg);
+    if (this.preBootBuffer.length > 1) return;
+    const prev = bootChain;
+    bootChain = new Promise<void>((release) => {
+      this.releaseBoot = release;
+    });
+    // 앞 세션이 init(또는 백스톱)으로 자리를 비운 뒤에 내 첫 입력을 흘려보낸다.
+    prev.then(() => this.flushBoot()).catch(() => this.flushBoot());
+  }
+
+  /** 부팅 락을 잡은 순간: 모아둔 첫 입력들을 순서대로 큐로 밀어 부팅을 시작하고 백스톱을 건다. */
+  private flushBoot(): void {
+    if (this.stopped) {
+      this.settleBoot(); // 대기 중 종료됐으면 부팅하지 않고 즉시 다음 세션을 푼다
+      return;
+    }
+    this.bootStarted = true;
+    for (const m of this.preBootBuffer) this.inputQueue.push(m); // 여기서 서브프로세스 부팅 시작
+    this.preBootBuffer = [];
+    // init(=쓰기 완료)이 오면 settleBoot() 로 다음 세션을 푼다. 안 오면 이 백스톱이 푼다.
+    setTimeout(() => this.settleBoot(), BOOT_SETTLE_MS);
+  }
+
+  /** 부팅 게이트를 한 번만 풀어준다 (init / 백스톱 / 종료·오류 중 가장 먼저 온 신호). */
+  private settleBoot(): void {
+    const release = this.releaseBoot;
+    if (release) {
+      this.releaseBoot = null;
+      release();
     }
   }
 
@@ -278,8 +312,8 @@ export class Session {
         this.handleMessage(msg);
       }
     } catch (err) {
-      // 시작 직후 죽었더라도 게이트를 풀어 다음 세션이 막히지 않게 한다.
-      this.settleStart();
+      // 부팅 직후 죽었더라도 게이트를 풀어 다음 세션 부팅이 막히지 않게 한다.
+      this.settleBoot();
       // 의도적 종료(stop→abort)로 인한 throw 는 에러로 표시하지 않는다.
       // (에러 상태로 두면 touch→emit 이 삭제된 세션을 다시 저장/브로드캐스트한다)
       if (this.stopped) return;
@@ -297,8 +331,8 @@ export class Session {
         if (sm.subtype === 'init') {
           this.sdkSessionId = msg.session_id;
           if (this.status === 'starting') this.setStatus('idle');
-          // 설정 파일(~/.claude.json) 쓰기가 끝난 시점 → 시작 게이트를 풀어 다음 세션을 시작시킨다.
-          this.settleStart();
+          // 설정 파일(~/.claude.json) 쓰기가 끝난 시점 → 부팅 게이트를 풀어 다음 세션을 부팅시킨다.
+          this.settleBoot();
           // 컨트롤 채널이 열린 직후(init) 자동 컴팩션 임계값을 낮춘다.
           // 복원된 큰 세션은 다음 턴에서 이 임계값을 넘어 곧바로 압축된다.
           // init 은 컴팩션 직후에도 다시 오므로, 한 번만 적용되게 가드.
@@ -398,7 +432,7 @@ export class Session {
         ]
       : text;
 
-    this.inputQueue.push({
+    this.enqueue({
       type: 'user',
       // SDK 는 Anthropic content block 배열을 그대로 받는다 (타입만 우회)
       message: { role: 'user', content: content as never },
@@ -427,7 +461,7 @@ export class Session {
     if (this.status === 'error') return;
     this.ensureStarted(); // 지연 복원 세션이면 먼저 SDK 기동
     this.addItem('user', '/compact (컨텍스트 압축 요청)');
-    this.inputQueue.push({
+    this.enqueue({
       type: 'user',
       message: { role: 'user', content: '/compact' as never },
       parent_tool_use_id: null,
@@ -449,7 +483,7 @@ export class Session {
   /** 세션을 완전히 종료하고 자원 정리 */
   stop(): void {
     this.stopped = true; // 이후 어떤 emit/save 도 막는다 → 삭제 후 부활 방지
-    this.settleStart(); // 시작 게이트에서 대기 중이었다면 풀어 다음 세션을 막지 않는다
+    this.settleBoot(); // 부팅 게이트에서 대기 중이었다면 풀어 다음 세션 부팅을 막지 않는다
     rejectSessionPermissions(this.id);
     this.inputQueue.close();
     this.abort.abort();
