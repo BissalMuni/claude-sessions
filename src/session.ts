@@ -6,6 +6,7 @@ import { AsyncQueue } from './asyncQueue.js';
 import { isDanger } from './dangerMode.js';
 import { shortId } from './ids.js';
 import { registerPermission, registerQuestion, rejectSessionPermissions } from './permissions.js';
+import { offendingToolPath } from './toolGuard.js';
 import type {
   InputImage,
   PendingPermission,
@@ -51,11 +52,23 @@ const DANGER_NOTE = [
   '특히 비가역적·위험한 작업을 실행하기 전에는 반드시 먼저 `AskUserQuestion` 으로 확인하라.',
 ].join('\n');
 
+// 폴더 샌드박스(제한 계정) 세션에 덧붙이는 안내. canUseTool 이 도구 호출을 차단하지만,
+// Bash 상대경로 탈출 등 코드 검사가 완벽치 못한 틈을 프롬프트로도 겹쳐 막는다.
+function sandboxNote(root: string): string {
+  return [
+    '',
+    '## 폴더 샌드박스',
+    `이 세션은 '${root}' 폴더 안에서만 작업해야 한다.`,
+    '그 밖의 파일을 읽거나 쓰지 마라 — 서버가 루트 밖 경로의 도구 호출을 차단한다.',
+  ].join('\n');
+}
+
 // 세션 시작 시점의 위험 모드에 맞춰 시스템 프롬프트 append 를 만든다.
 // (이미 떠 있는 세션의 systemPrompt 는 바꿀 수 없으므로, 토글 이후 새로 만든
 //  세션부터 경고가 반영된다. 게이트 동작 자체는 isDanger() 로 즉시 반영됨.)
-function buildSystemAppend(): string {
-  return isDanger() ? `${CONSTITUTION}\n${DANGER_NOTE}` : CONSTITUTION;
+function buildSystemAppend(root: string | null): string {
+  const base = isDanger() ? `${CONSTITUTION}\n${DANGER_NOTE}` : CONSTITUTION;
+  return root ? `${base}\n${sandboxNote(root)}` : base;
 }
 
 // 자동 컴팩션 임계값(토큰). 기본 ~190k(한도의 95%)는 너무 늦어, 컨텍스트가 200k까지
@@ -97,6 +110,10 @@ export interface SessionOpts {
   id: string;
   title: string;
   cwd: string;
+  /** 계정 샌드박스 루트. null 이면 무제한. 도구가 이 폴더 밖 파일을 건드리면 차단한다. */
+  root?: string | null;
+  /** 세션 소유 계정 id. null/미지정이면 레거시/공유(모든 계정에 보임). */
+  ownerId?: string | null;
   /** 상태가 바뀔 때마다 호출 (WebSocket broadcast 연결용) */
   onUpdate: (view: SessionView) => void;
   /** 복원용: 재기동 시 이어받을 SDK 세션 id (있으면 query 에 resume 로 전달) */
@@ -119,6 +136,8 @@ export class Session {
   readonly id: string;
   private title: string;
   private cwd: string;
+  private root: string | null;
+  private ownerId: string | null;
   private onUpdate: (view: SessionView) => void;
 
   private status: SessionStatus = 'starting';
@@ -158,6 +177,8 @@ export class Session {
     this.id = opts.id;
     this.title = opts.title;
     this.cwd = opts.cwd;
+    this.root = opts.root ?? null;
+    this.ownerId = opts.ownerId ?? null;
     this.onUpdate = opts.onUpdate;
     // 복원 케이스: 이전 sdkSessionId/기록/시각을 이어받는다. 없으면 새 세션.
     this.sdkSessionId = opts.resumeSessionId ?? null;
@@ -194,7 +215,7 @@ export class Session {
         permissionMode: 'default',
         // Claude Code 기본 시스템 프롬프트 + 공통 헌법(SYSTEM_APPEND) 주입.
         // 위험 모드면 헌법에 "도구 자동 실행" 경고가 덧붙는다.
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: buildSystemAppend() },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: buildSystemAppend(this.root) },
         // 로컬 스킬 플러그인 주입 + 전부 활성화. settingSources 와 무관하게 로드되므로
         // 전역 allowlist 는 끌어오지 않는다 → 폰 승인 게이트(canUseTool) 그대로 유지.
         // 스킬이 부르는 도구도 여전히 canUseTool 을 거쳐 폰 승인을 받는다.
@@ -224,6 +245,18 @@ export class Session {
             return {
               behavior: 'allow',
               updatedInput: { ...(input as Record<string, unknown>), answers: answers ?? {} },
+            };
+          }
+
+          // 폴더 샌드박스: 계정 루트 밖 파일을 건드리는 도구는 위험/안전 모드와 무관하게 차단.
+          // (root=null 무제한 계정이면 통과.) 위험 모드 자동 허용보다 먼저 검사해야 뚫리지 않는다.
+          const offending = offendingToolPath(toolName, input, this.root);
+          if (offending) {
+            this.addItem('system', `차단됨(루트 밖): ${toolName} → ${offending}`);
+            this.setStatus('thinking');
+            return {
+              behavior: 'deny',
+              message: `이 세션은 '${this.root}' 폴더 밖의 경로에 접근할 수 없습니다: ${offending}`,
             };
           }
 
@@ -566,6 +599,8 @@ export class Session {
       id: this.id,
       title: this.title,
       cwd: this.cwd,
+      root: this.root,
+      ownerId: this.ownerId,
       status: this.status,
       sdkSessionId: this.sdkSessionId,
       messages: this.messages,

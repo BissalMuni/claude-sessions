@@ -1,6 +1,7 @@
 import type { Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { TOKEN } from './auth.js';
+import { accountForToken, sessionVisibleTo } from './auth.js';
+import { auxStatus } from './auxServers.js';
 import type { SessionManager } from './sessionManager.js';
 
 // WebSocket 허브: 인증된 폰들에게 세션 이벤트를 푸시한다.
@@ -26,7 +27,9 @@ export function attachWebSocket(server: Server, manager: SessionManager): void {
 
   wss.on('connection', (ws: WebSocket, req) => {
     const url = new URL(req.url ?? '', 'http://localhost');
-    if (url.searchParams.get('token') !== TOKEN) {
+    // 다계정: 등록된 계정 중 하나와 토큰이 일치해야 통과(단일 TOKEN 비교 아님).
+    const account = accountForToken(url.searchParams.get('token'));
+    if (!account) {
       ws.close(4001, 'unauthorized');
       return;
     }
@@ -34,12 +37,22 @@ export function attachWebSocket(server: Server, manager: SessionManager): void {
     alive.add(ws);
     ws.on('pong', () => alive.add(ws));
 
-    // 접속 직후 현재 전체 상태 전송 (+ 위험 모드 현재값)
-    ws.send(JSON.stringify({ type: 'snapshot', sessions: manager.list(), danger: manager.isDanger() }));
+    // 접속 직후 현재 전체 상태 전송 (계정 격리: 볼 수 있는 세션만) (+ 위험 모드 + 보조 서버)
+    ws.send(
+      JSON.stringify({
+        type: 'snapshot',
+        sessions: manager.listFor(account),
+        danger: manager.isDanger(),
+        aux: auxStatus(),
+      }),
+    );
 
-    // 이후 변경을 구독
+    // 이후 변경을 구독. 격리: 이 계정이 못 보는 세션의 업데이트는 흘려보내지 않는다.
+    // (session_removed 는 sessionId 만 있어 소유 판별 불가하지만, 클라가 모르는 id 삭제는 무해하므로 그대로 전달.)
     const unsubscribe = manager.subscribe((event) => {
-      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(event));
+      if (ws.readyState !== ws.OPEN) return;
+      if (event.type === 'session_update' && !sessionVisibleTo(event.session.ownerId, account)) return;
+      ws.send(JSON.stringify(event));
     });
 
     ws.on('close', unsubscribe);

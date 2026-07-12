@@ -13,7 +13,7 @@
       <div class="gate-box">
         <h1>claude-sessions</h1>
         <p>서버 콘솔에 출력된 토큰을 입력하세요.</p>
-        <input id="token-input" type="text" inputmode="text" placeholder="토큰" autocomplete="off" />
+        <input id="token-input" type="text" inputmode="text" placeholder="토큰" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
         <button id="token-btn">접속</button>
         <div id="gate-err" class="err"></div>
       </div>
@@ -24,6 +24,8 @@
       <header class="topbar">
         <button id="list-btn" class="ghost tb-btn">◀ 목록</button>
         <button id="new-btn" class="ghost tb-btn">New</button>
+        <button id="logout-btn" class="ghost tb-btn">Logout</button>
+        <button id="aux-btn" class="ghost tb-btn">서버</button>
         <!-- 세션 동작 버튼: 세션이 선택됐을 때만 보인다(render 에서 토글) -->
         <button id="tb-interrupt" class="ghost tb-btn tb-sess hidden">중단</button>
         <button id="tb-reset" class="ghost tb-btn tb-sess hidden" title="이 세션을 닫고 같은 폴더로 새 세션 열기(대화/컨텍스트 초기화)">리셋</button>
@@ -42,7 +44,7 @@
     <div id="modal" class="modal hidden">
       <div class="modal-box">
         <div class="modal-head">
-          <h2>새 세션</h2>
+          <h2 id="modal-title">새 세션</h2>
           <div class="modal-head-actions">
             <button id="modal-cancel" class="ghost">취소</button>
             <button id="modal-create">생성</button>
@@ -55,9 +57,43 @@
         </div>
         <div id="picker-sel" class="picker-sel hidden"></div>
         <input id="cwd-input" type="text" placeholder="폴더를 고르거나 직접 입력" autocomplete="off" />
-        <label>제목 (선택)</label>
-        <input id="title-input" type="text" placeholder="비우면 폴더명" autocomplete="off" />
+        <div id="modal-title-group">
+          <label>제목 (선택)</label>
+          <input id="title-input" type="text" placeholder="비우면 폴더명" autocomplete="off" />
+        </div>
         <div id="modal-err" class="err"></div>
+      </div>
+    </div>
+
+    <!-- 보조 서버(정적/업로드) 모달 -->
+    <div id="aux-modal" class="modal hidden">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h2>보조 서버</h2>
+          <div class="modal-head-actions">
+            <button id="aux-close" class="ghost">닫기</button>
+          </div>
+        </div>
+        <label>대상 폴더</label>
+        <div class="aux-dir-row">
+          <input id="aux-dir" type="text" placeholder="폴더를 선택하세요" autocomplete="off" />
+          <button id="aux-pick" class="ghost">📁 선택</button>
+        </div>
+        <div class="aux-srv" id="aux-static">
+          <div class="aux-srv-head">정적 파일 서버 <span class="aux-state" id="aux-static-state">꺼짐</span></div>
+          <div class="aux-srv-actions">
+            <button id="aux-static-start">열기</button>
+            <button id="aux-static-stop" class="ghost">닫기</button>
+          </div>
+        </div>
+        <div class="aux-srv" id="aux-upload">
+          <div class="aux-srv-head">업로드 서버 <span class="aux-state" id="aux-upload-state">꺼짐</span></div>
+          <div class="aux-srv-actions">
+            <button id="aux-upload-start">열기</button>
+            <button id="aux-upload-stop" class="ghost">닫기</button>
+          </div>
+        </div>
+        <div id="aux-err" class="err"></div>
       </div>
     </div>
 

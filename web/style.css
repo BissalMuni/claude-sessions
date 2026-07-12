@@ -94,8 +94,21 @@ input, textarea {
   flex: 1 1 0; min-width: 0; padding: 8px 4px; font-size: 14px;
   text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-/* New(새 세션) 버튼은 목록 화면에서만 보인다(세션 상세 = body.viewing 일 땐 숨김) */
-body.viewing #new-btn { display: none; }
+/* 보조 서버 모달 */
+.aux-dir-row { display: flex; gap: 8px; }
+.aux-dir-row input { flex: 1 1 auto; min-width: 0; }
+.aux-dir-row button { flex: none; }
+.aux-srv { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; background: var(--panel2); }
+.aux-srv-head { font-weight: 600; margin-bottom: 8px; }
+.aux-state { font-weight: 400; color: var(--muted); font-size: 14px; }
+.aux-state.on { color: var(--green); }
+.aux-state a { color: var(--accent); word-break: break-all; }
+.aux-srv-actions { display: flex; gap: 8px; }
+.aux-srv-actions button { flex: 1 1 0; }
+/* 보조 서버가 하나라도 켜져 있으면 상단 '서버' 버튼 강조 */
+#aux-btn.on { color: var(--green); font-weight: 700; }
+
+/* New(새 세션) 버튼은 목록 화면과 세션 상세('◀ 목록' 다음)에 항상 보인다 */
 .layout { flex: 1; display: flex; min-height: 0; }
 .list { width: 240px; border-right: 1px solid var(--line); overflow-y: auto; flex: none; background: var(--panel); }
 .detail { flex: 1; display: flex; flex-direction: column; min-width: 0; }

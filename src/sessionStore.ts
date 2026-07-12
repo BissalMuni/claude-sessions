@@ -20,10 +20,19 @@ export interface PersistedSession {
   id: string;
   title: string;
   cwd: string;
+  /** 계정 샌드박스 루트(null=무제한). 복원 시 도구 경로 검사 기준을 잃지 않도록 함께 저장. */
+  root?: string | null;
+  /** 세션 소유 계정 id(null/미지정=레거시/공유). 복원 후에도 격리를 유지하도록 저장. */
+  ownerId?: string | null;
   sdkSessionId: string | null; // null 이면 resume 불가 → 빈 컨텍스트로 새로 시작
   messages: StreamItem[];
   createdAt: string;
   updatedAt: string;
+  /**
+   * 종료(보관)됨. true 면 기록은 남기되 재기동 시 활성 세션으로 복원하지 않는다.
+   * (사용자가 '종료'한 세션 = 연속성 대상 아님. 기록/감사는 보존.)
+   */
+  ended?: boolean;
 }
 
 // 메모리 캐시. 첫 접근 시 디스크에서 1회 로드한다.
@@ -75,19 +84,33 @@ export function loadPersistedSessions(): PersistedSession[] {
 /** 세션 스냅샷을 저장(디바운스). resume 에 필요한 핵심 필드만 추린다. */
 export function saveSession(view: SessionView): void {
   const map = load();
+  const prev = map.get(view.id);
   map.set(view.id, {
     id: view.id,
     title: view.title,
     cwd: view.cwd,
+    root: view.root ?? null,
+    ownerId: view.ownerId ?? null,
     sdkSessionId: view.sdkSessionId,
     messages: view.messages,
     createdAt: view.createdAt,
     updatedAt: view.updatedAt,
+    // 한 번 종료(보관) 표시된 세션은 이후 저장에서도 그 상태를 잃지 않게 보존.
+    ...(prev?.ended ? { ended: true } : {}),
   });
   scheduleWrite();
 }
 
-/** 세션 제거 → 저장소에서도 삭제 */
+/** 세션 종료(보관) 표시 → 기록은 남기되 재기동 시 복원 대상에서 제외. */
+export function markEnded(id: string): void {
+  const map = load();
+  const rec = map.get(id);
+  if (!rec || rec.ended) return;
+  rec.ended = true;
+  scheduleWrite();
+}
+
+/** 세션 제거 → 저장소에서도 완전 삭제(기록도 사라짐). */
 export function deleteSession(id: string): void {
   if (load().delete(id)) scheduleWrite();
 }

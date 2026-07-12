@@ -62,6 +62,10 @@ export interface SessionView {
   id: string;
   title: string;
   cwd: string;
+  /** 이 세션이 접근 가능한 루트 폴더(계정 샌드박스). null 이면 무제한. 도구 경로 검사 기준. */
+  root: string | null;
+  /** 세션 소유 계정 id(=토큰 해시). null 이면 레거시/공유(모든 계정에 보임). */
+  ownerId: string | null;
   status: SessionStatus;
   sdkSessionId: string | null; // SDK가 발급한 실제 세션 id (resume용)
   messages: StreamItem[];
@@ -74,9 +78,22 @@ export interface SessionView {
   stalled: boolean;
 }
 
+/** 보조 서버(정적/업로드) 상태 — 한 개 */
+export interface AuxOne {
+  running: boolean;
+  dir?: string;
+  port?: number;
+}
+/** 보조 서버 전체 상태 */
+export interface AuxStatus {
+  static: AuxOne;
+  upload: AuxOne;
+}
+
 /** WebSocket 으로 서버 → 폰 푸시되는 이벤트 */
 export type ServerEvent =
-  | { type: 'snapshot'; sessions: SessionView[]; danger: boolean } // 접속 직후 전체(+위험 모드)
+  | { type: 'snapshot'; sessions: SessionView[]; danger: boolean; aux: AuxStatus } // 접속 직후 전체(+위험 모드+보조 서버)
   | { type: 'session_update'; session: SessionView } // 세션 변경
   | { type: 'session_removed'; sessionId: string }
-  | { type: 'danger'; danger: boolean }; // 위험 모드 토글 (모든 기기 동기화)
+  | { type: 'danger'; danger: boolean } // 위험 모드 토글 (모든 기기 동기화)
+  | { type: 'aux'; aux: AuxStatus }; // 보조 서버 상태 변경 (모든 기기 동기화)

@@ -9,7 +9,8 @@ import { createLiteRouter } from './lite.js';
 import { attachWebSocket } from './ws.js';
 import { SessionManager } from './sessionManager.js';
 import { isDanger } from './dangerMode.js';
-import { TOKEN } from './auth.js';
+import { ACCOUNTS } from './auth.js';
+import { stopAllAux } from './auxServers.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0'; // LAN 의 다른 기기에서 접속 가능하게
@@ -95,7 +96,15 @@ server.listen(PORT, HOST, () => {
   const ips = lanIps();
   console.log('─'.repeat(56));
   console.log(' claude-sessions 서버 시작');
-  console.log(` 토큰: ${TOKEN}`);
+  if (ACCOUNTS.length === 1 && ACCOUNTS[0].root === null) {
+    console.log(` 토큰: ${ACCOUNTS[0].token}`);
+  } else {
+    // 다계정(비번→루트 샌드박스). 비번마다 접근 루트를 함께 출력한다.
+    console.log(` 접근 계정 ${ACCOUNTS.length}개 (비번 → 접근 폴더):`);
+    for (const a of ACCOUNTS) {
+      console.log(`   ${a.token}  →  ${a.root ?? '(전체 접근)'}${a.label ? `  [${a.label}]` : ''}`);
+    }
+  }
   console.log(' 폰 브라우저 접속:');
   for (const ip of ips) console.log(`   http://${ip}:${PORT}`);
   console.log(`   (로컬: http://localhost:${PORT})`);
@@ -120,6 +129,8 @@ for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
     shuttingDown = true;
     logServer('signal', `${sig} 수신 → 정상 종료 (크래시 아님, 외부 종료)`);
     manager.shutdown();
+    void stopAllAux(); // 보조 서버(정적/업로드)도 함께 닫는다
+
     // 소켓이 늦게 닫혀도 창이 영영 안 닫히지 않게 안전 타임아웃 후 강제 종료.
     const t = setTimeout(() => process.exit(0), 2000);
     if (typeof t.unref === 'function') t.unref();

@@ -4,8 +4,9 @@ import { Session } from './session.js';
 import { shortId } from './ids.js';
 import { bumpFolderFreq } from './folderFreq.js';
 import { resolvePermission, resolveQuestion, type Answers, type Decision } from './permissions.js';
-import { deleteSession, flushSessions, loadPersistedSessions, saveSession } from './sessionStore.js';
-import type { InputImage, ServerEvent, SessionView } from './types.js';
+import { flushSessions, loadPersistedSessions, markEnded, saveSession } from './sessionStore.js';
+import { sessionVisibleTo, type Account } from './auth.js';
+import type { AuxStatus, InputImage, ServerEvent, SessionView } from './types.js';
 
 /** 세션 풀을 관리하고 변경을 구독자(WebSocket)에게 알린다 */
 export class SessionManager {
@@ -44,11 +45,15 @@ export class SessionManager {
    */
   restore(): number {
     const records = loadPersistedSessions();
+    let restored = 0;
     for (const rec of records) {
+      if (rec.ended) continue; // 종료(보관)된 세션은 기록만 남기고 활성으로 복원하지 않는다
       if (this.sessions.has(rec.id)) continue;
       const session = new Session({
         id: rec.id,
         cwd: rec.cwd,
+        root: rec.root ?? null, // 복원 세션도 원래 샌드박스 루트를 유지
+        ownerId: rec.ownerId ?? null, // 소유 계정도 유지(격리 지속)
         title: rec.title,
         onUpdate: this.onSessionUpdate,
         resumeSessionId: rec.sdkSessionId,
@@ -58,18 +63,21 @@ export class SessionManager {
         lazy: true, // 첫 사용 시점까지 SDK 기동을 미룬다
       });
       this.sessions.set(rec.id, session);
+      restored++;
       // start() 하지 않는다 — sendPrompt 시 Session 이 알아서 ensureStarted().
     }
-    return records.length;
+    return restored;
   }
 
   /** 새 세션 생성 + 시작 */
-  create(opts: { cwd: string; title?: string }): SessionView {
+  create(opts: { cwd: string; title?: string; root?: string | null; ownerId?: string | null }): SessionView {
     const id = shortId('sess');
     const cwd = resolvePath(opts.cwd);
     const session = new Session({
       id,
       cwd,
+      root: opts.root ?? null, // 계정 샌드박스 루트(null=무제한)
+      ownerId: opts.ownerId ?? null, // 생성한 계정 = 소유주(격리 기준)
       title: opts.title?.trim() || cwd.split(/[\\/]/).pop() || cwd,
       onUpdate: this.onSessionUpdate,
     });
@@ -118,13 +126,18 @@ export class SessionManager {
     return true;
   }
 
-  /** 세션 종료 + 제거 */
+  /**
+   * 세션 종료(보관). SDK 를 정지하고 활성 목록에서 내리되, 기록은 스토어에 남긴다(ended 표시).
+   * 재기동 시 restore() 가 ended 레코드를 건너뛰므로 종료한 세션은 되살아나지 않는다.
+   * (완전 삭제가 아니라 '연속성 대상에서 제외' — 기록/감사는 보존.)
+   */
   remove(id: string): boolean {
     const session = this.sessions.get(id);
     if (!session) return false;
-    session.stop();
+    // 활성 맵에서 먼저 내린다 → onSessionUpdate 가드가 뒤늦은 저장을 막아 ended 표시를 덮어쓰지 않음.
     this.sessions.delete(id);
-    deleteSession(id); // 저장소에서도 제거 → 재기동 시 복원 안 됨
+    session.stop();
+    markEnded(id); // 삭제가 아니라 종료(보관): 기록은 남기고 복원만 차단
     this.broadcast({ type: 'session_removed', sessionId: id });
     return true;
   }
@@ -141,26 +154,43 @@ export class SessionManager {
     return v;
   }
 
+  /** 보조 서버(정적/업로드) 상태를 모든 구독자에게 브로드캐스트. */
+  broadcastAux(aux: AuxStatus): void {
+    this.broadcast({ type: 'aux', aux });
+  }
+
   get(id: string): SessionView | null {
     return this.sessions.get(id)?.view() ?? null;
+  }
+
+  /** 이 계정이 그 세션을 볼/조작할 수 있는가(격리 검사). 없는 세션이면 false. */
+  canAccess(id: string, account?: Account): boolean {
+    const v = this.sessions.get(id)?.view();
+    return !!v && sessionVisibleTo(v.ownerId, account);
+  }
+
+  /** 계정이 볼 수 있는 세션만 반환(소유 세션 + 레거시/공유). */
+  getFor(id: string, account?: Account): SessionView | null {
+    const v = this.get(id);
+    return v && sessionVisibleTo(v.ownerId, account) ? v : null;
   }
 
   list(): SessionView[] {
     return [...this.sessions.values()].map((s) => s.view());
   }
 
+  /** 계정이 볼 수 있는 세션 목록(격리). */
+  listFor(account?: Account): SessionView[] {
+    return this.list().filter((v) => sessionVisibleTo(v.ownerId, account));
+  }
+
   /**
-   * 목록 표시용 세션들. 같은 폴더(cwd)는 가장 최근(updatedAt) 세션 하나만 남긴다.
-   * 나머지 지난(종료된) 중복 세션은 기록(store)은 보존하되 목록에서만 숨긴다.
-   * 화면 표시 전용 필터이므로 list()/저장소는 그대로 두고 여기서만 거른다.
+   * 목록 표시용 세션들 = 현재 활성 세션 전부.
+   * 종료(보관)된 세션은 restore() 가 애초에 활성으로 복원하지 않으므로 목록에 안 뜬다.
+   * 따라서 예전처럼 폴더당 1개로 접을 필요가 없다 — 진행 중 세션은 폴더 무관 전부 보여준다.
    */
   listVisible(): SessionView[] {
-    const latest = new Map<string, SessionView>();
-    for (const v of this.list()) {
-      const cur = latest.get(v.cwd);
-      if (!cur || v.updatedAt.localeCompare(cur.updatedAt) > 0) latest.set(v.cwd, v);
-    }
-    return [...latest.values()];
+    return this.list();
   }
 
   /** 프로세스 종료 시 전체 정리 */

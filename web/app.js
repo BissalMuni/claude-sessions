@@ -19,6 +19,8 @@ const state = {
   flashTimer: null, // 깜빡임 종료 시 화면을 한 번 더 그려 효과를 끄는 타이머
   pickerSelected: new Set(), // 새 세션 모달에서 다중 선택한 폴더 경로(한 번에 여러 세션 생성)
   danger: true, // 위험 모드(모든 도구 자동 실행). 서버 snapshot/danger 이벤트로 동기화. 기본 ON.
+  aux: { static: { running: false }, upload: { running: false } }, // 보조 서버 상태(서버 동기화)
+  pickerPick: null, // 폴더 피커가 '단일 폴더 선택' 모드일 때의 콜백(있으면 세션 생성 대신 이 콜백 호출)
 };
 
 // ---------- 폴더 사용 빈도 (자주 여는 프로젝트를 위로) ----------
@@ -110,6 +112,25 @@ $('token-btn').onclick = () => {
 $('token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('token-btn').click(); });
 $('list-btn').onclick = () => selectSession(null); // 상단바: 목록으로 복귀
 
+// 로그아웃: 저장된 토큰을 지우고 연결을 끊은 뒤 로그인 화면으로.
+// (다계정 — 다른 비번으로 다시 접속할 때 사용)
+$('logout-btn').onclick = () => {
+  if (!confirm('로그아웃할까요?')) return;
+  state.token = ''; // 먼저 비운다 → ws.onclose 의 자동 재연결 가드가 재접속을 막는다
+  localStorage.removeItem('sm_token');
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  if (state.ws) {
+    const ws = state.ws;
+    ws.onopen = ws.onclose = ws.onmessage = ws.onerror = null; // 핸들러 떼고 조용히 닫기
+    try { ws.close(); } catch { /* half-open 이면 실패해도 무시 */ }
+    state.ws = null;
+  }
+  state.sessions.clear();
+  state.selected = null;
+  $('token-input').value = '';
+  showGate('');
+};
+
 // 상단바 세션 동작 버튼(중단/리셋/종료): 현재 선택된 세션(state.selected)에 대해 동작.
 // 정적 버튼이라 시작 시 한 번만 연결한다. 세션 미선택 시엔 render()가 .tb-sess 를 숨긴다.
 $('tb-interrupt').onclick = () => {
@@ -118,7 +139,7 @@ $('tb-interrupt').onclick = () => {
 };
 $('tb-remove').onclick = () => {
   const id = state.selected;
-  if (id && confirm('이 세션을 종료할까요?')) api('DELETE', `/sessions/${id}`).catch(showErr);
+  if (id && confirm('이 세션을 종료할까요?\n(대화 기록은 보관되며, 재시작해도 되살아나지 않습니다)')) api('DELETE', `/sessions/${id}`).catch(showErr);
 };
 $('tb-reset').onclick = () => {
   const s = state.selected ? state.sessions.get(state.selected) : null;
@@ -156,11 +177,19 @@ async function api(method, path, body) {
 
 // ---------- WebSocket ----------
 function connect() {
+  // 기존 소켓이 남아있으면 핸들러를 떼고 닫는다. 이렇게 해야 그 소켓의 onclose 가
+  // 또 재연결을 걸어 소켓이 중복 생성되는 일을 막는다(깨어남 재연결 ↔ 자동 재연결이 겹칠 때).
+  if (state.ws) {
+    const old = state.ws;
+    old.onopen = old.onclose = old.onmessage = old.onerror = null;
+    try { old.close(); } catch { /* half-open 이면 실패할 수 있으나 무시 */ }
+  }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(state.token)}`);
   state.ws = ws;
   ws.onopen = () => $('conn')?.classList.add('on'); // 연결 동그라미는 제거됨 → 있으면만 갱신
   ws.onclose = (e) => {
+    if (state.ws !== ws) return; // 이미 새 소켓으로 교체된 낡은 소켓의 close 는 무시
     $('conn')?.classList.remove('on');
     if (e.code === 4001) { showGate('토큰이 올바르지 않습니다.'); return; }
     setTimeout(() => { if (state.token) connect(); }, 1500); // 자동 재연결
@@ -168,14 +197,28 @@ function connect() {
   ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
 }
 
+// 폰이 절전에서 깨어나거나 탭으로 돌아올 때의 소켓 죽음 대응.
+// half-open(조용히 죽은) 소켓은 onclose 가 안 떠서 스스로 못 살아나고, 게다가
+// readyState 는 죽은 소켓도 OPEN 으로 잘못 보고한다 → "열려있음"을 믿을 수 없다.
+// 그래서 화면이 다시 보이는 순간 그냥 새로 연결하고(비용은 LAN 에서 무시할 수준),
+// 최신 상태도 곧장 당겨와 재연결 스냅샷을 기다리지 않는다.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden || !state.token) return;
+  connect();      // connect() 가 낡은 소켓을 안전히 정리하고 새로 연다
+  pollSessions(); // 깨어나자마자 화면 즉시 최신화
+});
+
 function handleEvent(ev) {
   if (ev.type === 'snapshot') {
     state.sessions.clear();
     for (const s of ev.sessions) { state.sessions.set(s.id, s); state.prevStatus.set(s.id, s.status); }
     state.notified = state.notified.filter((id) => state.sessions.has(id)); // 재연결 시 큐 정리
     if (typeof ev.danger === 'boolean') state.danger = ev.danger; // 위험 모드 현재값 동기화
+    if (ev.aux) { state.aux = ev.aux; renderAux(); } // 보조 서버 현재값 동기화
   } else if (ev.type === 'danger') {
     state.danger = ev.danger; // 다른 기기에서 토글한 결과 동기화
+  } else if (ev.type === 'aux') {
+    state.aux = ev.aux; renderAux(); // 다른 기기의 보조 서버 토글 동기화
   } else if (ev.type === 'session_update') {
     state.sessions.set(ev.session.id, ev.session);
     if (answered(ev.session)) enqueueNotice(ev.session.id);
@@ -223,12 +266,6 @@ function byImportance(a, b) {
 }
 
 function render() {
-  // 재렌더 전에 입력창 포커스/커서 위치를 기억해 둔다 (이벤트 도중 타이핑 끊김 방지)
-  const active = document.activeElement;
-  const promptFocused = !!active && active.id === 'prompt';
-  const caretStart = promptFocused ? active.selectionStart : null;
-  const caretEnd = promptFocused ? active.selectionEnd : null;
-
   // 로그 스크롤 위치 보존: 재렌더(폴링/업데이트)로 읽던 위치가 튀지 않게.
   // 맨 아래 근처였으면 새 내용 따라 내려가고, 아니면 보던 위치를 그대로 둔다.
   const oldLog = $('log');
@@ -245,26 +282,16 @@ function render() {
 
   const newLog = $('log');
   if (newLog) newLog.scrollTop = logNearBottom ? newLog.scrollHeight : logPrevTop;
-
-  // 입력 중이었다면 포커스와 커서 위치를 복원한다
-  if (promptFocused) {
-    const p = $('prompt');
-    if (p) {
-      p.focus();
-      if (caretStart != null) p.setSelectionRange(caretStart, caretEnd);
-    }
-  }
+  // 입력창(textarea)은 세션이 바뀔 때만 새로 만들어지고(그 외 재렌더에선 그대로 유지),
+  // 다른 세션 업데이트/폴링이 와도 파괴되지 않는다 → 포커스/커서/IME 조합이 끊기지 않음.
+  // (예전엔 매 렌더마다 detail.innerHTML 을 통째로 갈아엎어 타이핑이 방해받았다.)
 }
 
-// 같은 폴더(cwd)는 가장 최근(updatedAt) 대화 하나만 목록에 띄운다.
-// 나머지 지난(종료된) 중복 세션은 기록은 남기되 목록에서만 숨긴다(표시 전용 필터).
+// 진행 중 세션은 폴더 무관 전부 목록에 띄운다.
+// 종료(보관)한 세션은 서버가 재기동 시 복원하지 않으므로 애초에 목록에 없다 —
+// 예전처럼 폴더당 1개로 접지 않는다(그 접기가 새로 만든 세션까지 가리던 문제였음).
 function latestPerFolder(sessions) {
-  const latest = new Map();
-  for (const s of sessions) {
-    const cur = latest.get(s.cwd);
-    if (!cur || s.updatedAt.localeCompare(cur.updatedAt) > 0) latest.set(s.cwd, s);
-  }
-  return [...latest.values()];
+  return sessions;
 }
 
 function renderList() {
@@ -301,19 +328,31 @@ function renderList() {
   }
 }
 
+// 상세 화면은 두 부분으로 나뉜다:
+//  1) 입력창(textarea)을 포함한 정적 골격 — 세션이 바뀔 때만 buildDetailShell 로 새로 만든다.
+//  2) 머리말/승인·질문/로그 등 동적 영역 — 매 렌더마다 updateDetailDynamic 로 갱신한다.
+// 이렇게 나눠야 다른 세션 업데이트·폴링이 와도 입력창 DOM 이 파괴되지 않아
+// 포커스/커서/한글(IME) 조합이 끊기지 않는다. (예전엔 매 렌더마다 통째로 갈아엎었다.)
 function renderDetail() {
   const detail = $('detail');
   const s = state.selected ? state.sessions.get(state.selected) : null;
-  if (!s) { detail.innerHTML = '<div class="empty">세션을 선택하거나 새로 만드세요.</div>'; return; }
+  if (!s) {
+    if (detail.dataset.sid !== '') { detail.innerHTML = '<div class="empty">세션을 선택하거나 새로 만드세요.</div>'; detail.dataset.sid = ''; }
+    return;
+  }
+  // 선택된 세션이 바뀌었을 때만 골격(입력창 포함)을 다시 만든다.
+  if (detail.dataset.sid !== String(s.id)) {
+    buildDetailShell(detail, s);
+    detail.dataset.sid = String(s.id);
+  }
+  updateDetailDynamic(s);
+}
 
+// 정적 골격: 입력창/첨부/빠른실행 등 — 세션당 한 번만 만들고 이벤트를 연결한다.
+function buildDetailShell(detail, s) {
   detail.innerHTML = `
-    <div class="detail-head">
-      <span class="title">${esc(s.title)}</span>
-      ${statusBadge(s)}
-      <button class="ghost nav" id="d-notice" title="알림 세션으로 이동(먼저 등록된 순)">🔔<span class="notice-count" id="d-notice-count">0</span></button>
-    </div>
-    ${s.pending ? renderPerm(s) : ''}
-    ${s.question ? renderQuestion(s) : ''}
+    <div class="detail-head" id="detail-head"></div>
+    <div id="detail-alert"></div>
     <div class="log" id="log"></div>
     <div class="composer">
       <div class="quick-actions" id="quick-actions">
@@ -339,32 +378,8 @@ function renderDetail() {
       <input type="file" id="docfile" multiple hidden>
     </div>`;
 
-  const log = $('log');
-  for (const m of s.messages) {
-    const el = document.createElement('div');
-    el.className = 'msg ' + m.kind;
-    el.innerHTML = `<div class="who">${whoLabel(m.kind)}</div><div class="body">${renderBody(m.text)}</div>`;
-    log.appendChild(el);
-  }
-  // 스크롤 위치는 render() 가 보존/복원한다 (여기서 강제로 맨 아래로 내리지 않음)
-
-  // 중단/리셋/종료 버튼은 상단 topbar(tb-interrupt/tb-reset/tb-remove)로 옮겨졌고,
-  // 시작 시 한 번 state.selected 기준으로 연결된다(여기서 매 렌더마다 다시 연결하지 않음).
-
-  // 상단바 🔔 : 답변이 뜬(알림) 세션 개수를 보여주고,
-  // 누르면 제일 먼저 등록된(선입선출) 세션으로 이동한다.
-  const noticeBtn = $('d-notice');
-  $('d-notice-count').textContent = state.notified.length;
-  noticeBtn.disabled = state.notified.length === 0;
-  if (Date.now() < state.noticeFlashUntil) noticeBtn.classList.add('flash'); // 새 알림 후 2초간 깜빡
-  noticeBtn.onclick = () => {
-    // 이미 사라진 세션은 큐 앞에서 건너뛰고, 살아있는 첫 알림으로 이동
-    while (state.notified.length && !state.sessions.has(state.notified[0])) state.notified.shift();
-    const first = state.notified[0];
-    if (first) selectSession(first); // selectSession 이 해당 알림을 큐에서 제거
-  };
-
-  // 입력 중이던 초안을 복원하고, 타이핑할 때마다 초안을 저장한다 (재렌더에도 보존)
+  // 입력 중이던 초안을 복원하고, 타이핑할 때마다 초안을 저장한다 (재렌더에도 보존).
+  // 골격은 세션당 한 번만 만들므로 이 input 리스너도 한 번만 연결된다(중복 누적 없음).
   const prompt = $('prompt');
   prompt.value = state.drafts.get(s.id) || '';
   prompt.addEventListener('input', () => state.drafts.set(s.id, prompt.value));
@@ -375,6 +390,19 @@ function renderDetail() {
   $('file').addEventListener('change', async (e) => {
     await addImages(s.id, e.target.files);
     e.target.value = ''; // 같은 파일 다시 선택 가능하게 초기화
+    renderThumbs(s.id);
+  });
+
+  // 클립보드 붙여넣기(스크린샷 등) → 이미지 인라인 첨부
+  prompt.addEventListener('paste', async (e) => {
+    const items = [...(e.clipboardData?.items || [])];
+    const imgFiles = items
+      .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+      .map((it) => it.getAsFile())
+      .filter(Boolean);
+    if (imgFiles.length === 0) return; // 이미지가 없으면 일반 텍스트 붙여넣기로 진행
+    e.preventDefault(); // 이미지 데이터가 텍스트로 들어가는 것 방지
+    await addImages(s.id, imgFiles);
     renderThumbs(s.id);
   });
 
@@ -436,12 +464,58 @@ function renderDetail() {
   };
   // 위험 모드 ON/OFF 토글: 서버에 반영 → danger 이벤트로 모든 기기 동기화
   $('qa-danger').onclick = () => toggleDanger();
+}
 
-  if (s.pending) {
-    $('perm-yes').onclick = () => decide(s, 'yes');
-    $('perm-no').onclick = () => decide(s, 'no');
+// 동적 영역: 머리말/승인·질문/로그/위험버튼 상태 — 입력창은 건드리지 않는다.
+function updateDetailDynamic(s) {
+  // 머리말(제목·상태 배지·🔔 알림 버튼)
+  $('detail-head').innerHTML = `
+    <span class="title">${esc(s.title)}</span>
+    ${statusBadge(s)}
+    <button class="ghost nav" id="d-notice" title="알림 세션으로 이동(먼저 등록된 순)">🔔<span class="notice-count" id="d-notice-count">0</span></button>`;
+  const noticeBtn = $('d-notice');
+  $('d-notice-count').textContent = state.notified.length;
+  noticeBtn.disabled = state.notified.length === 0;
+  if (Date.now() < state.noticeFlashUntil) noticeBtn.classList.add('flash'); // 새 알림 후 2초간 깜빡
+  noticeBtn.onclick = () => {
+    // 이미 사라진 세션은 큐 앞에서 건너뛰고, 살아있는 첫 알림으로 이동
+    while (state.notified.length && !state.sessions.has(state.notified[0])) state.notified.shift();
+    const first = state.notified[0];
+    if (first) selectSession(first); // selectSession 이 해당 알림을 큐에서 제거
+  };
+
+  // 승인/질문 영역 — 내용(승인/질문)이 바뀔 때만 다시 그린다.
+  // 매 폴링마다 innerHTML 을 갈아엎으면 질문 선택지·기타 입력창의 포커스/타이핑(IME)이
+  // 끊긴다. 같은 질문이 그대로면 DOM 을 그대로 두어 입력 중인 값이 살아있게 한다.
+  const alertEl = $('detail-alert');
+  const alertSig = (s.pending ? 'P:' + (s.pending.requestId || '') : '') +
+                   (s.question ? 'Q:' + (s.question.requestId || '') : '');
+  if (alertEl.dataset.sig !== alertSig) {
+    alertEl.dataset.sig = alertSig;
+    alertEl.innerHTML = (s.pending ? renderPerm(s) : '') + (s.question ? renderQuestion(s) : '');
+    if (s.pending) {
+      $('perm-yes').onclick = () => decide(s, 'yes');
+      $('perm-no').onclick = () => decide(s, 'no');
+    }
+    if (s.question) wireQuestion(s);
   }
-  if (s.question) wireQuestion(s);
+
+  // 로그 (스크롤 위치는 render() 가 보존/복원한다)
+  const log = $('log');
+  log.innerHTML = '';
+  for (const m of s.messages) {
+    const el = document.createElement('div');
+    el.className = 'msg ' + m.kind;
+    el.innerHTML = `<div class="who">${whoLabel(m.kind)}</div><div class="body">${renderBody(m.text)}</div>`;
+    log.appendChild(el);
+  }
+
+  // 위험 버튼 상태(다른 기기 토글로도 바뀔 수 있어 매 렌더마다 반영)
+  const dgr = $('qa-danger');
+  if (dgr) {
+    dgr.className = `qa-btn qa-danger ${state.danger ? 'on' : 'off'}`;
+    dgr.innerHTML = state.danger ? '위험<br>ON' : '안전<br>OFF';
+  }
 }
 
 // 빠른 실행: 입력창을 거치지 않고 즉시 프롬프트를 전송한다 (폰에서 한 번 탭).
@@ -609,6 +683,12 @@ function refreshPickRows() {
 }
 // 선택한 폴더 막대(칩 목록 + 비우기) + 생성 버튼 라벨 갱신
 function renderPickerSelected() {
+  // 폴더 선택 모드에선 다중선택/생성 UI 를 쓰지 않는다(현재 폴더만 고른다).
+  if (state.pickerPick) {
+    $('picker-sel')?.classList.add('hidden');
+    const b = $('modal-create'); if (b) b.textContent = '이 폴더 선택';
+    return;
+  }
   const bar = $('picker-sel');
   const n = state.pickerSelected.size;
   if (bar) {
@@ -628,14 +708,39 @@ function renderPickerSelected() {
 }
 
 $('new-btn').onclick = async () => {
+  state.pickerPick = null; // 세션 생성 모드
+  $('modal-title').textContent = '새 세션';
+  $('modal-title-group').classList.remove('hidden');
+  $('picker-sel').classList.remove('hidden');
   $('modal').classList.remove('hidden');
   $('modal-err').textContent = '';
   state.pickerSelected.clear();
   renderPickerSelected();
   loadPicker(await getStartDir());
 };
-$('modal-cancel').onclick = () => { state.pickerSelected.clear(); renderPickerSelected(); $('modal').classList.add('hidden'); };
+// 폴더 하나만 고르는 피커(보조 서버 등에서 재사용). onPick(경로) 콜백 호출.
+async function openFolderPicker(onPick) {
+  state.pickerPick = onPick;
+  $('modal-title').textContent = '폴더 선택';
+  $('modal-title-group').classList.add('hidden'); // 제목 입력 숨김
+  $('picker-sel').classList.add('hidden'); // 다중선택 막대 숨김
+  state.pickerSelected.clear();
+  $('modal-err').textContent = '';
+  $('modal-create').textContent = '이 폴더 선택';
+  $('modal').classList.remove('hidden');
+  loadPicker($('aux-dir').value.trim() || (await getStartDir()));
+}
+$('modal-cancel').onclick = () => { state.pickerPick = null; state.pickerSelected.clear(); renderPickerSelected(); $('modal').classList.add('hidden'); };
 $('modal-create').onclick = async () => {
+  // 폴더 선택 모드: 현재 폴더를 콜백에 넘기고 닫는다(세션 생성 안 함).
+  if (state.pickerPick) {
+    const dir = $('cwd-input').value.trim();
+    if (!dir) { $('modal-err').textContent = '폴더를 선택하세요.'; return; }
+    const cb = state.pickerPick; state.pickerPick = null;
+    $('modal').classList.add('hidden');
+    cb(dir);
+    return;
+  }
   const sel = [...state.pickerSelected];
   // 다중 선택이 있으면 일괄 생성 (제목은 각 폴더명을 쓰므로 입력칸 무시)
   if (sel.length > 0) {
@@ -833,6 +938,58 @@ function whoLabel(kind) {
 }
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function showErr(e) { alert(e.message || String(e)); }
+
+// ---------- 보조 서버(정적/업로드) ----------
+// 현재 상태(state.aux)를 모달·상단 버튼에 반영.
+function renderAux() {
+  const anyOn = state.aux.static.running || state.aux.upload.running;
+  $('aux-btn')?.classList.toggle('on', anyOn);
+  for (const kind of ['static', 'upload']) {
+    const s = state.aux[kind] || { running: false };
+    const stateEl = $(`aux-${kind}-state`);
+    if (stateEl) {
+      if (s.running) {
+        const url = `http://${location.hostname}:${s.port}/`;
+        stateEl.classList.add('on');
+        stateEl.innerHTML = `켜짐 · <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a><br><span class="muted">${esc(s.dir || '')}</span>`;
+      } else {
+        stateEl.classList.remove('on');
+        stateEl.textContent = '꺼짐';
+      }
+    }
+    const startBtn = $(`aux-${kind}-start`); if (startBtn) startBtn.disabled = false;
+    const stopBtn = $(`aux-${kind}-stop`); if (stopBtn) stopBtn.disabled = !s.running;
+  }
+}
+async function auxAction(kind, action) {
+  $('aux-err').textContent = '';
+  const dir = $('aux-dir').value.trim();
+  if (action === 'start' && !dir) { $('aux-err').textContent = '대상 폴더를 선택하세요.'; return; }
+  try {
+    const d = await api('POST', '/aux', { kind, action, dir });
+    state.aux = d.aux; renderAux();
+  } catch (e) { $('aux-err').textContent = e.message; }
+}
+$('aux-btn').onclick = async () => {
+  $('aux-err').textContent = '';
+  // 대상 폴더 기본값: 선택된 세션의 cwd(있으면)
+  if (!$('aux-dir').value.trim() && state.selected) {
+    const s = state.sessions.get(state.selected);
+    if (s?.cwd) $('aux-dir').value = s.cwd;
+  }
+  $('aux-modal').classList.remove('hidden');
+  try { const d = await api('GET', '/aux'); state.aux = d.aux; } catch { /* 스냅샷 값 유지 */ }
+  renderAux();
+};
+$('aux-close').onclick = () => $('aux-modal').classList.add('hidden');
+$('aux-pick').onclick = () => {
+  $('aux-modal').classList.add('hidden'); // 피커 모달과 겹치지 않게 잠시 숨김
+  openFolderPicker((dir) => { $('aux-dir').value = dir; $('aux-modal').classList.remove('hidden'); renderAux(); });
+};
+$('aux-static-start').onclick = () => auxAction('static', 'start');
+$('aux-static-stop').onclick = () => auxAction('static', 'stop');
+$('aux-upload-start').onclick = () => auxAction('upload', 'start');
+$('aux-upload-stop').onclick = () => auxAction('upload', 'stop');
 
 // ---------- 시작 ----------
 if (state.token) enterApp(); else showGate('');

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { browse, defaultStartPath } from './browse.js';
-import { TOKEN } from './auth.js';
+import { accountForToken, type Account } from './auth.js';
 import type { SessionManager } from './sessionManager.js';
 import type { SessionView } from './types.js';
 
@@ -40,78 +40,95 @@ function byImportance(a: SessionView, b: SessionView): number {
 export function createLiteRouter(manager: SessionManager): Router {
   const router = Router();
 
-  // --- 토큰 확인: 없거나 틀리면 로그인 페이지 ---
+  // --- 접근 확인 ---
+  // lite 는 full-access(root=null) 계정만 쓸 수 있다. 샌드박스(루트 제한) 계정은
+  // lite 가 폴더 제한을 강제하지 않으므로 아예 차단한다(SPA 를 쓰도록 안내).
   function tokenOf(req: any): string | null {
     const t = req.query?.token ?? req.body?.token;
     return typeof t === 'string' ? t : null;
   }
-  function authed(req: any): boolean {
-    return tokenOf(req) === TOKEN;
+  // 통과하면 { token, account } 반환, 아니면 보여줄 페이지({ page }) 반환.
+  function gate(req: any): { token: string; account: Account } | { page: string } {
+    const t = tokenOf(req);
+    const acc = accountForToken(t);
+    if (!acc) return { page: loginPage() };
+    if (acc.root !== null) return { page: restrictedPage() };
+    return { token: acc.token, account: acc };
   }
 
-  // 로그인 페이지
+  // 로그인/대시보드
   router.get('/', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
-    res.send(dashboardPage(manager.listVisible(), TOKEN, manager.isDanger()));
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
+    res.send(dashboardPage(manager.listFor(g.account), g.token, manager.isDanger()));
   });
 
   // 세션 상세
   router.get('/session', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const id = String(req.query.id || '');
-    const view = manager.get(id);
-    if (!view) return res.send(notFoundPage(TOKEN));
+    const view = manager.getFor(id, g.account);
+    if (!view) return res.send(notFoundPage(g.token));
     // 대시보드와 같은 중요도순으로 정렬해 '다음' 세션(프로젝트) id 를 계산.
     // 맨 끝에서는 처음으로 순환(wrap-around) → '다음'은 항상 다음 프로젝트 상세로 바로 연결된다.
-    const ordered = [...manager.listVisible()].sort(byImportance);
+    const ordered = [...manager.listFor(g.account)].sort(byImportance);
     const idx = ordered.findIndex((x) => x.id === id);
     const nextId = idx >= 0 && ordered.length > 1 ? ordered[(idx + 1) % ordered.length].id : null;
-    res.send(detailPage(view, TOKEN, nextId, manager.isDanger()));
+    res.send(detailPage(view, g.token, nextId, manager.isDanger()));
   });
 
-  // 폴더 피커 (새 세션)
+  // 폴더 피커 (새 세션) — full-access 계정만 오므로 무제한 탐색
   router.get('/new', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     // 쿼리에 path 가 있으면 그걸로(빈 문자열='상위로 → 드라이브 목록'도 존중), 없으면 기본 시작 폴더
     const path = typeof req.query.path === 'string' ? req.query.path : defaultStartPath();
-    res.send(pickerPage(browse(path), TOKEN));
+    res.send(pickerPage(browse(path), g.token));
   });
 
   // --- 액션 (POST 폼) ---
 
   router.post('/create', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const cwd = String(req.body.cwd || '').trim();
     const title = String(req.body.title || '').trim();
-    if (!cwd) return res.send(messagePage('작업 폴더가 없습니다.', TOKEN));
-    const view = manager.create({ cwd, title });
-    res.redirect(liteUrl('/lite/session', { token: TOKEN, id: view.id }));
+    if (!cwd) return res.send(messagePage('작업 폴더가 없습니다.', g.token));
+    const view = manager.create({ cwd, title, ownerId: g.account.id });
+    res.redirect(liteUrl('/lite/session', { token: g.token, id: view.id }));
   });
 
   router.post('/prompt', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const id = String(req.body.id || '');
+    if (!manager.canAccess(id, g.account)) return res.send(notFoundPage(g.token));
     const text = String(req.body.text || '').trim();
     if (text) manager.sendPrompt(id, text);
-    res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
+    res.redirect(liteUrl('/lite/session', { token: g.token, id }));
   });
 
   router.post('/approve', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const id = String(req.body.id || '');
+    if (!manager.canAccess(id, g.account)) return res.send(notFoundPage(g.token));
     const requestId = String(req.body.requestId || '');
     const decision = req.body.decision === 'yes' ? 'yes' : 'no';
     manager.approve(requestId, decision);
     // 승인은 대시보드에서도 자주 누르므로, 온 곳(back)으로 돌려보낸다
     const back = String(req.body.back || '');
-    res.redirect(back === 'dashboard' ? liteUrl('/lite', { token: TOKEN }) : liteUrl('/lite/session', { token: TOKEN, id }));
+    res.redirect(back === 'dashboard' ? liteUrl('/lite', { token: g.token }) : liteUrl('/lite/session', { token: g.token, id }));
   });
 
   router.post('/answer', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const id = String(req.body.id || '');
+    if (!manager.canAccess(id, g.account)) return res.send(notFoundPage(g.token));
     const requestId = String(req.body.requestId || '');
-    const view = manager.get(id);
+    const view = manager.getFor(id, g.account);
     const questions = view?.question?.questions ?? [];
     const answers: Record<string, string> = {};
     questions.forEach((q, qi) => {
@@ -126,41 +143,49 @@ export function createLiteRouter(manager: SessionManager): Router {
       answers[q.question] = vals.join(', ');
     });
     manager.answer(requestId, answers);
-    res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
+    res.redirect(liteUrl('/lite/session', { token: g.token, id }));
   });
 
   router.post('/interrupt', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const id = String(req.body.id || '');
+    if (!manager.canAccess(id, g.account)) return res.send(notFoundPage(g.token));
     void manager.interrupt(id);
-    res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
+    res.redirect(liteUrl('/lite/session', { token: g.token, id }));
   });
 
   // 수동 컴팩션 (CPT) — 이 세션 컨텍스트를 지금 압축해 토큰 재독 비용을 줄인다
   router.post('/compact', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const id = String(req.body.id || '');
+    if (!manager.canAccess(id, g.account)) return res.send(notFoundPage(g.token));
     manager.compact(id);
-    res.redirect(liteUrl('/lite/session', { token: TOKEN, id }));
+    res.redirect(liteUrl('/lite/session', { token: g.token, id }));
   });
 
   router.post('/remove', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
-    manager.remove(String(req.body.id || ''));
-    res.redirect(liteUrl('/lite', { token: TOKEN }));
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
+    const id = String(req.body.id || '');
+    if (!manager.canAccess(id, g.account)) return res.send(notFoundPage(g.token));
+    manager.remove(id);
+    res.redirect(liteUrl('/lite', { token: g.token }));
   });
 
   // 위험 모드 토글 (JS 없는 폼). 켜기는 자동 실행을 여는 동작이라 확인 페이지를 한 번 거친다.
   // 끄기(안전 방향)는 즉시 적용. 토글하면 SPA 등 모든 기기에 danger 이벤트가 브로드캐스트된다.
   router.post('/danger', (req, res) => {
-    if (!authed(req)) return res.send(loginPage());
+    const g = gate(req);
+    if ('page' in g) return res.send(g.page);
     const to = req.body.to === 'on' ? 'on' : 'off';
     const back = String(req.body.back || ''); // 'dashboard' 또는 세션 id
     if (to === 'on' && req.body.confirm !== '1') {
-      return res.send(dangerConfirmPage(TOKEN, back));
+      return res.send(dangerConfirmPage(g.token, back));
     }
     manager.setDanger(to === 'on');
-    res.redirect(liteBackUrl(back, TOKEN));
+    res.redirect(liteBackUrl(back, g.token));
   });
 
   return router;
@@ -232,6 +257,21 @@ function loginPage(): string {
 <form method="get" action="/lite">
   <input type="text" name="token" placeholder="토큰" autocomplete="off">
   <p><button class="btn btn-big" type="submit">접속</button></p>
+</form>`,
+  );
+}
+
+// 샌드박스(루트 제한) 계정이 lite 로 들어오면 보여줄 차단 페이지.
+// lite 는 폴더 제한을 강제하지 않으므로 접근을 막고 기본 UI 로 안내한다.
+function restrictedPage(): string {
+  return page(
+    'claude-sessions',
+    `<div class="bar"><h1>claude-sessions</h1></div>
+<p>이 계정은 폴더 접근이 제한되어 있어 lite 화면을 쓸 수 없습니다.</p>
+<p>기본 화면( / )으로 접속하세요.</p>
+<form method="get" action="/lite">
+  <input type="text" name="token" placeholder="다른 토큰" autocomplete="off">
+  <p><button class="btn btn-big" type="submit">다시 접속</button></p>
 </form>`,
   );
 }
