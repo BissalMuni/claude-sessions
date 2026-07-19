@@ -14,7 +14,9 @@
       "Bash(npx tsc *)",
       "Bash(echo \"exit: $?\")",
       "Bash(timeout 10 node node_modules/tsx/dist/cli.mjs src/server.ts)",
-      "Bash(tasklist)"
+      "Bash(tasklist)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

@@ -146,6 +146,24 @@ $('tb-reset').onclick = () => {
   if (s) resetSession(s);
 };
 
+// 상단바 더보기(⋮) 메뉴: 서버/로그아웃(전역) + 리셋/종료(세션). 좁은 폰에서 버튼이 안 잘리게 묶는다.
+function closeMoreMenu() {
+  $('tb-menu-pop').classList.add('hidden');
+  $('tb-more').setAttribute('aria-expanded', 'false');
+}
+$('tb-more').onclick = (e) => {
+  e.stopPropagation(); // 바깥 클릭 닫기 핸들러로 즉시 다시 닫히는 것 방지
+  const pop = $('tb-menu-pop');
+  const open = pop.classList.toggle('hidden') === false;
+  $('tb-more').setAttribute('aria-expanded', String(open));
+};
+// 메뉴 항목을 누르면(각 항목의 기존 onclick 실행 후) 메뉴를 닫는다.
+$('tb-menu-pop').addEventListener('click', () => closeMoreMenu());
+// 바깥을 누르면 닫는다.
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.tb-menu')) closeMoreMenu();
+});
+
 // 새 대화: 이 세션을 닫고 같은 폴더로 새 세션을 연다(서버의 대화/컨텍스트 초기화).
 async function resetSession(s) {
   if (!confirm('이 세션을 닫고 같은 폴더로 새 세션을 열까요?\n(대화와 컨텍스트가 초기화됩니다)')) return;
@@ -944,6 +962,8 @@ function showErr(e) { alert(e.message || String(e)); }
 function renderAux() {
   const anyOn = state.aux.static.running || state.aux.upload.running;
   $('aux-btn')?.classList.toggle('on', anyOn);
+  // 서버가 메뉴(⋮) 안에 숨어 있으므로, 켜져 있으면 ⋮ 버튼에도 초록 표시를 준다.
+  $('tb-more')?.classList.toggle('has-active', anyOn);
   for (const kind of ['static', 'upload']) {
     const s = state.aux[kind] || { running: false };
     const stateEl = $(`aux-${kind}-state`);
