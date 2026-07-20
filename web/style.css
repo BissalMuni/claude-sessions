@@ -314,3 +314,27 @@ input, textarea {
   .topbar { flex-wrap: nowrap; gap: 5px; padding: 8px; }
   .composer textarea { height: 52px; }
 }
+
+/* ---------- 서버 현황 페이지 ---------- */
+/* 목록 맨 위 고정 항목(세션 아님) — 상태 배지가 없어 살짝 구분되게 */
+.item.srv-nav { background: var(--panel2); }
+.item.srv-nav.active { background: var(--line); }
+
+.srv-page { flex: 1; overflow-y: auto; padding: 12px 14px; }
+.srv-summary { color: var(--muted); font-size: 14.4px; margin-bottom: 10px; }
+.srv-summary b { color: var(--green); }
+.srv-grp {
+  color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+  margin: 16px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--line);
+}
+.srv-row { padding: 9px 4px; border-bottom: 1px solid var(--line); }
+.srv-row.down { opacity: .5; }
+.srv-main { display: flex; align-items: center; gap: 8px; }
+.srv-dot { width: 9px; height: 9px; border-radius: 999px; flex: none; }
+.srv-dot.up { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,.6); }
+.srv-dot.down { background: var(--line); }
+.srv-name { font-weight: 600; }
+.srv-port { color: var(--muted); font-size: 14.4px; }
+.srv-sub { color: var(--muted); font-size: 13.6px; margin: 2px 0 0 17px; }
+.srv-proj { color: var(--accent); }
+.srv-muted { color: var(--muted); }

@@ -4,6 +4,7 @@ import { browse, defaultStartPath, isWithinRoot } from './browse.js';
 import { auxStatus, startAux, stopAux, type AuxKind } from './auxServers.js';
 import { saveUploads } from './uploads.js';
 import { getFolderFreq } from './folderFreq.js';
+import { serverStatus } from './servers.js';
 import type { SessionManager } from './sessionManager.js';
 import type { InputFile, InputImage } from './types.js';
 
@@ -72,6 +73,15 @@ export function createApiRouter(manager: SessionManager): Router {
   // 보조 서버(정적/업로드) 상태 조회
   router.get('/aux', (_req, res) => {
     res.json({ aux: auxStatus() });
+  });
+
+  // 로컬 서버 현황 — 이 PC 에서 LISTEN 중인 포트(알려진 고정 서버 + 기타)
+  router.get('/servers', async (_req, res) => {
+    try {
+      res.json(await serverStatus());
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
   });
 
   // 보조 서버 열기/닫기 — 정적 파일 서버 또는 업로드 서버.

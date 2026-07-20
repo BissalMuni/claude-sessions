@@ -21,7 +21,11 @@ const state = {
   danger: true, // 위험 모드(모든 도구 자동 실행). 서버 snapshot/danger 이벤트로 동기화. 기본 ON.
   aux: { static: { running: false }, upload: { running: false } }, // 보조 서버 상태(서버 동기화)
   pickerPick: null, // 폴더 피커가 '단일 폴더 선택' 모드일 때의 콜백(있으면 세션 생성 대신 이 콜백 호출)
+  serversTimer: null, // 서버 현황 페이지를 보는 동안의 자동 새로고침 타이머
 };
+
+// 목록 맨 위 고정 항목: 세션이 아니라 "서버 현황" 특수 페이지를 가리키는 센티넬 id.
+const SERVERS_ID = '__servers__';
 
 // ---------- 폴더 사용 빈도 (자주 여는 프로젝트를 위로) ----------
 // 빈도는 이제 서버(.data/folder-freq.json)에 모아 모든 기기가 공유한다.
@@ -290,11 +294,12 @@ function render() {
   const logPrevTop = oldLog ? oldLog.scrollTop : 0;
   const logNearBottom = oldLog ? oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 60 : true;
 
-  // 폰 마스터-디테일: 유효한 세션이 선택됐을 때만 상세 화면을 보인다
-  const hasSel = state.selected != null && state.sessions.has(state.selected);
+  // 폰 마스터-디테일: 유효한 세션(또는 서버 현황 페이지)이 선택됐을 때만 상세 화면을 보인다
+  const isServers = state.selected === SERVERS_ID;
+  const hasSel = isServers || (state.selected != null && state.sessions.has(state.selected));
   document.body.classList.toggle('viewing', hasSel);
-  // 상단 세션 동작 버튼(중단/리셋/종료)은 세션 선택 시에만 노출
-  document.querySelectorAll('.tb-sess').forEach((b) => b.classList.toggle('hidden', !hasSel));
+  // 상단 세션 동작 버튼(중단/리셋/종료)은 실제 세션을 볼 때만 노출(서버 현황 페이지에선 숨김)
+  document.querySelectorAll('.tb-sess').forEach((b) => b.classList.toggle('hidden', !hasSel || isServers));
   renderList();
   renderDetail();
 
@@ -316,6 +321,18 @@ function renderList() {
   const list = $('list');
   const sessions = latestPerFolder([...state.sessions.values()]).sort(byImportance);
   list.innerHTML = '';
+
+  // 목록 맨 위 고정: "서버 현황" — 로컬에서 돌고 있는 서버들의 실행 상태 페이지(세션 아님)
+  const srv = document.createElement('div');
+  srv.className = 'item srv-nav' + (state.selected === SERVERS_ID ? ' active' : '');
+  srv.onclick = () => selectSession(SERVERS_ID);
+  srv.innerHTML = `
+    <div class="row">
+      <span class="title">🖥️ 서버 현황</span>
+    </div>
+    <div class="cwd">로컬에서 돌고 있는 서버</div>`;
+  list.appendChild(srv);
+
   for (const s of sessions) {
     const el = document.createElement('div');
     el.className = 'item' + (s.id === state.selected ? ' active' : '');
@@ -353,6 +370,15 @@ function renderList() {
 // 포커스/커서/한글(IME) 조합이 끊기지 않는다. (예전엔 매 렌더마다 통째로 갈아엎었다.)
 function renderDetail() {
   const detail = $('detail');
+  // 서버 현황 페이지: 세션 상세 대신 로컬 서버 목록을 그린다(골격은 진입 시 한 번만).
+  if (state.selected === SERVERS_ID) {
+    if (detail.dataset.sid !== SERVERS_ID) {
+      buildServersShell(detail);
+      detail.dataset.sid = SERVERS_ID;
+    }
+    return;
+  }
+  stopServersTimer(); // 서버 현황 페이지를 벗어나면 자동 새로고침 정지
   const s = state.selected ? state.sessions.get(state.selected) : null;
   if (!s) {
     if (detail.dataset.sid !== '') { detail.innerHTML = '<div class="empty">세션을 선택하거나 새로 만드세요.</div>'; detail.dataset.sid = ''; }
@@ -1010,6 +1036,69 @@ $('aux-static-start').onclick = () => auxAction('static', 'start');
 $('aux-static-stop').onclick = () => auxAction('static', 'stop');
 $('aux-upload-start').onclick = () => auxAction('upload', 'start');
 $('aux-upload-stop').onclick = () => auxAction('upload', 'stop');
+
+// ---------- 서버 현황 페이지 ----------
+// 로컬에서 돌고 있는 서버(알려진 고정 서버 + 기타 LISTEN 포트)를 보여준다.
+// 세션이 아니라 목록 맨 위 "🖥️ 서버 현황" 특수 항목을 누르면 이 페이지가 상세 영역에 뜬다.
+function stopServersTimer() {
+  if (state.serversTimer) { clearInterval(state.serversTimer); state.serversTimer = null; }
+}
+
+function buildServersShell(detail) {
+  detail.innerHTML = `
+    <div class="detail-head">
+      <span class="title">🖥️ 서버 현황</span>
+      <button class="ghost nav" id="srv-refresh" title="새로고침">⟳</button>
+    </div>
+    <div class="srv-page" id="srv-page"><div class="empty">불러오는 중…</div></div>`;
+  $('srv-refresh').onclick = () => refreshServers();
+  refreshServers();
+  // 보는 동안 5초마다 자동 갱신(페이지를 벗어나면 renderDetail 이 타이머를 끈다)
+  stopServersTimer();
+  state.serversTimer = setInterval(() => {
+    if (state.selected === SERVERS_ID) refreshServers(); else stopServersTimer();
+  }, 5000);
+}
+
+async function refreshServers() {
+  const page = $('srv-page');
+  if (!page) return;
+  try {
+    const d = await api('GET', '/servers');
+    page.innerHTML = renderServersHtml(d);
+  } catch (e) {
+    page.innerHTML = `<div class="empty">불러오지 못했어요: ${esc(e.message || String(e))}</div>`;
+  }
+}
+
+function renderServersHtml(d) {
+  const known = d.known || [];
+  const others = d.others || [];
+  const dot = (up) => `<span class="srv-dot ${up ? 'up' : 'down'}"></span>`;
+  const row = (up, name, port, sub) => `
+    <div class="srv-row ${up ? 'up' : 'down'}">
+      <div class="srv-main">${dot(up)}<span class="srv-name">${esc(name)}</span><span class="srv-port">:${port}</span></div>
+      ${sub ? `<div class="srv-sub">${sub}</div>` : ''}
+    </div>`;
+
+  const knownRows = known.map((s) => {
+    const sub = `${esc(s.desc || '')}${s.project ? ` · <span class="srv-proj">${esc(s.project)}</span>` : ''}` +
+                `${s.up && s.pid ? ` · pid ${s.pid}` : ''}`;
+    return row(s.up, s.name, s.port, sub);
+  }).join('');
+
+  const otherRows = others.length
+    ? `<div class="srv-grp">기타 (레지스트리 밖)</div>` +
+      others.map((o) => row(true, o.name || '(알 수 없음)', o.port, `pid ${o.pid ?? '?'}`)).join('')
+    : '';
+
+  const upCount = known.filter((s) => s.up).length;
+  const when = d.at ? new Date(d.at).toLocaleTimeString('ko-KR') : '';
+  const hidden = d.hidden ? ` · <span class="srv-muted">시스템 ${d.hidden}개 숨김</span>` : '';
+  return `
+    <div class="srv-summary">고정 서버 <b>${upCount}/${known.length}</b> 실행 중${others.length ? ` · 기타 ${others.length}개` : ''}${hidden} · ${when}</div>
+    <div class="srv-grp">고정 서버</div>${knownRows}${otherRows}`;
+}
 
 // ---------- 시작 ----------
 if (state.token) enterApp(); else showGate('');
