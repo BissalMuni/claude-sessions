@@ -4,20 +4,20 @@
 
 ```powershell
 cd C:\Users\minh0\Downloads\coding\claude-sessions
-$env:SCREEN_TOKEN = "!"; pnpm start
+$env:SCREEN_TOKEN = "changeme"; pnpm start
 ```
 
 한 줄로:
 
 ```powershell
-cd C:\Users\minh0\Downloads\coding\claude-sessions; $env:SCREEN_TOKEN="!"; pnpm start
+cd C:\Users\minh0\Downloads\coding\claude-sessions; $env:SCREEN_TOKEN="changeme"; pnpm start
 ```
 
 ## CMD (명령 프롬프트)
 
 ```cmd
 cd /d C:\Users\minh0\Downloads\coding\claude-sessions
-set "SCREEN_TOKEN=!" && pnpm start
+set "SCREEN_TOKEN=changeme" && pnpm start
 ```
 
 한 줄로:
