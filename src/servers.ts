@@ -5,6 +5,7 @@
 // up. 별도 소켓 프로브는 하지 않는다(netstat 이 이미 정확하고, 타임아웃 지연도 없다).
 
 import { execFile } from 'node:child_process';
+import { freemem, totalmem } from 'node:os';
 
 /** 고정 서버 레지스트리 — coding 생태계 포트(claudia/docs/PORTS.md 와 맞춤). */
 export interface ServerEntry {
@@ -91,11 +92,23 @@ async function listeningPorts(): Promise<Map<number, number>> {
   return map;
 }
 
+// tasklist 는 ~700ms 로 비싸다. 서버 현황(processNames)과 RAM 탭(memStatus)이
+// 같은 5초 주기에 둘 다 호출하므로, 짧은 TTL 캐시로 스캔을 1회로 합친다.
+let taskCache: { at: number; out: string } | null = null;
+const TASKLIST_TTL_MS = 3000;
+async function tasklistCsv(): Promise<string> {
+  const now = Date.now();
+  if (taskCache && now - taskCache.at < TASKLIST_TTL_MS) return taskCache.out;
+  const out = await run('tasklist', ['/FO', 'CSV', '/NH']);
+  taskCache = { at: now, out };
+  return out;
+}
+
 /** tasklist → Map<pid, 이미지명>. 필요한 pid 만 이름을 붙인다. */
 async function processNames(pids: Set<number>): Promise<Map<number, string>> {
   const map = new Map<number, string>();
   if (pids.size === 0) return map;
-  const out = await run('tasklist', ['/FO', 'CSV', '/NH']);
+  const out = await tasklistCsv();
   for (const line of out.split(/\r?\n/)) {
     // "이미지명","PID","세션이름","세션#","메모리"
     const m = line.match(/^"([^"]*)","(\d+)"/);
@@ -137,4 +150,100 @@ export async function serverStatus(): Promise<ServerStatus> {
   }
 
   return { at: new Date().toISOString(), known, others, hidden };
+}
+
+// ---------- RAM 사용현황 ----------
+// "서버 현황" 밑에 붙는 RAM 탭이 읽는다. 시스템 전체 메모리 + 프로세스별 사용량(상위 N).
+// 프로세스는 폰에서 골라 종료할 수 있으므로, 종료 가드(guardKill)로 이 서버 자신과
+// OS 핵심 프로세스는 절대 못 죽이게 막는다.
+
+export interface ProcInfo {
+  pid: number;
+  name: string;
+  mb: number; // Working Set (물리 메모리) MB
+  self: boolean; // 이 컨트롤러 서버 프로세스인가(종료 금지 표시)
+  protectedProc: boolean; // OS 핵심/보호 대상이라 종료 불가인가
+}
+export interface MemStatus {
+  at: string;
+  totalMb: number;
+  freeMb: number;
+  usedMb: number;
+  usedPct: number;
+  procs: ProcInfo[];
+}
+
+// 종료를 막을 OS 핵심 프로세스(이미지명 소문자). 실수로 시스템을 깨는 걸 방지.
+const PROTECTED_PROCS = new Set([
+  'system', 'system idle process', 'registry', 'memory compression',
+  'smss.exe', 'csrss.exe', 'wininit.exe', 'winlogon.exe', 'services.exe',
+  'lsass.exe', 'svchost.exe', 'fontdrvhost.exe', 'dwm.exe', 'explorer.exe',
+  'spoolsv.exe', 'taskhostw.exe', 'ctfmon.exe',
+]);
+const PROTECTED_PIDS = new Set([0, 4]); // System Idle, System
+
+/** tasklist 메모리 문자열("70,388 K") → MB(정수). 실패 시 0. */
+function parseMemKb(s: string): number {
+  const digits = s.replace(/[^\d]/g, '');
+  if (!digits) return 0;
+  return Math.round(Number(digits) / 1024); // KB → MB
+}
+
+/**
+ * 프로세스별 RAM 사용량 상위 목록. tasklist 한 번으로 전 프로세스를 훑고 MB 로 환산해
+ * 내림차순 정렬 후 상위 `top` 개만 돌려준다(폰 화면·페이로드 절약).
+ */
+export async function memStatus(top = 30): Promise<MemStatus> {
+  const totalMb = Math.round(totalmem() / 1024 / 1024);
+  const freeMb = Math.round(freemem() / 1024 / 1024);
+  const usedMb = totalMb - freeMb;
+  const usedPct = totalMb ? Math.round((usedMb / totalMb) * 100) : 0;
+
+  const out = await tasklistCsv();
+  const rows: ProcInfo[] = [];
+  const self = process.pid;
+  for (const line of out.split(/\r?\n/)) {
+    // "이미지명","PID","세션이름","세션#","메모리 사용"
+    const m = line.match(/^"([^"]*)","(\d+)","[^"]*","[^"]*","([^"]*)"/);
+    if (!m) continue;
+    const name = m[1];
+    const pid = Number(m[2]);
+    const mb = parseMemKb(m[3]);
+    const lname = name.trim().toLowerCase();
+    rows.push({
+      pid,
+      name,
+      mb,
+      self: pid === self,
+      protectedProc: PROTECTED_PIDS.has(pid) || PROTECTED_PROCS.has(lname),
+    });
+  }
+  rows.sort((a, b) => b.mb - a.mb);
+  return { at: new Date().toISOString(), totalMb, freeMb, usedMb, usedPct, procs: rows.slice(0, top) };
+}
+
+export interface KillResult { ok: boolean; pid: number; reason?: string }
+
+/**
+ * 프로세스 종료 — 반드시 특정 PID 만. 이 서버 자신(process.pid)과 OS 핵심 프로세스는
+ * 절대 못 죽이게 막는다(이름으로 일괄 종료 금지 원칙과 동일). taskkill /F /PID 사용.
+ */
+export async function killProcess(pid: number): Promise<KillResult> {
+  if (!Number.isInteger(pid) || pid <= 0) return { ok: false, pid, reason: '잘못된 PID' };
+  if (pid === process.pid) return { ok: false, pid, reason: '컨트롤러 서버 자신은 종료할 수 없습니다' };
+  if (PROTECTED_PIDS.has(pid)) return { ok: false, pid, reason: 'OS 핵심 프로세스는 종료할 수 없습니다' };
+
+  // 이름 확인 후 보호 대상이면 거부(가드 이중화).
+  const names = await processNames(new Set([pid]));
+  const lname = (names.get(pid) || '').trim().toLowerCase();
+  if (lname && PROTECTED_PROCS.has(lname)) {
+    return { ok: false, pid, reason: `보호된 프로세스(${lname})는 종료할 수 없습니다` };
+  }
+
+  return await new Promise<KillResult>((resolve) => {
+    execFile('taskkill', ['/F', '/PID', String(pid)], { windowsHide: true }, (err, _out, stderr) => {
+      if (!err) resolve({ ok: true, pid });
+      else resolve({ ok: false, pid, reason: (stderr || err.message || 'taskkill 실패').trim() });
+    });
+  });
 }

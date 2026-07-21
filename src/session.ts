@@ -100,6 +100,9 @@ const BOOT_SETTLE_MS = Number(process.env.SCREEN_START_SETTLE_MS) || 25_000;
 const STALL_HINT_MS = Number(process.env.STALL_HINT_MS) || 90_000;
 // SDK 서브프로세스 stderr/디버그 로그를 세션별로 남길 디렉터리
 const LOG_DIR = join(process.cwd(), 'logs');
+// 모든 세션의 SDK 스트림 오류(=폰이 보는 "CLI 응답 에러")를 한 파일에 모아 남긴다.
+// stderr(logs/<id>.log)로는 안 잡히는, for await 루프에서 던져진 예외를 여기서 포착한다.
+const ERROR_LOG = join(LOG_DIR, 'errors.log');
 
 // 로컬 스킬 플러그인(절대경로). src/ 든 dist/ 든 항상 설치 루트의 skills-plugin/ 을
 // 가리킨다. 세션 cwd 와 무관하게 모든 세션에 같은 스킬 묶음을 주입하기 위함.
@@ -351,6 +354,7 @@ export class Session {
       // (에러 상태로 두면 touch→emit 이 삭제된 세션을 다시 저장/브로드캐스트한다)
       if (this.stopped) return;
       this.error = err instanceof Error ? err.message : String(err);
+      this.logError(err);
       this.addItem('error', this.error);
       this.setStatus('error');
     }
@@ -580,6 +584,25 @@ export class Session {
     if (now !== this.stalled) {
       this.stalled = now;
       this.touch();
+    }
+  }
+
+  /**
+   * SDK 스트림 루프에서 던져진 오류를 logs/errors.log 에 영구 기록한다.
+   * 폰이 보는 "CLI 응답 에러"의 실제 원인(과부하/네트워크/서브프로세스 크래시)을
+   * 사후에 확인하기 위한 관찰용. 세션별 로그(logs/<id>.log)에도 함께 남긴다.
+   */
+  private logError(err: unknown): void {
+    try {
+      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+      const at = new Date().toISOString();
+      const msg = err instanceof Error ? err.message : String(err);
+      const stack = err instanceof Error && err.stack ? `\n${err.stack}` : '';
+      const line = `[${at}] ${this.id} "${this.title}" (${this.cwd})\n  ${msg}${stack}\n`;
+      appendFileSync(ERROR_LOG, line);
+      appendFileSync(join(LOG_DIR, `${this.id}.log`), line);
+    } catch {
+      /* 로깅 실패가 세션을 죽이면 안 된다 */
     }
   }
 

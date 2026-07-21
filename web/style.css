@@ -338,3 +338,26 @@ input, textarea {
 .srv-sub { color: var(--muted); font-size: 13.6px; margin: 2px 0 0 17px; }
 .srv-proj { color: var(--accent); }
 .srv-muted { color: var(--muted); }
+
+/* RAM 사용현황 (서버 현황 밑 섹션) */
+.srv-grp.mem-head { display: flex; align-items: center; justify-content: space-between; }
+.srv-grp.mem-head button { font-size: 12px; padding: 4px 10px; }
+button.ghost.danger { color: var(--red); border-color: var(--red); }
+button.ghost.danger:disabled { opacity: .4; }
+.mem-summary { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; margin: 4px 0 10px; flex-wrap: wrap; }
+.mem-summary b { color: var(--green); }
+.mem-summary.warn b { color: var(--red); }
+.mem-track { flex: 1; min-width: 120px; height: 7px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.mem-track-fill { display: block; height: 100%; background: var(--green); }
+.mem-summary.warn .mem-track-fill { background: var(--red); }
+.mem-row { display: flex; align-items: center; gap: 8px; padding: 7px 4px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.mem-row.locked { cursor: default; opacity: .55; }
+.mem-chk { flex: none; width: 16px; height: 16px; }
+.mem-name { flex: 1 1 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.mem-pid { color: var(--muted); font-size: 13px; flex: none; }
+.mem-bar { flex: 0 0 64px; height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.mem-bar-fill { display: block; height: 100%; background: var(--accent); }
+.mem-mb { flex: none; width: 62px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13.5px; }
+.mem-tag { font-size: 11px; padding: 1px 6px; border-radius: 6px; font-weight: 600; margin-left: 4px; }
+.mem-tag.self { background: rgba(34,197,94,.18); color: var(--green); }
+.mem-tag.lock { background: var(--line); color: var(--muted); }

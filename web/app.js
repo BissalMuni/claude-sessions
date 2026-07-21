@@ -1063,12 +1063,94 @@ function buildServersShell(detail) {
 async function refreshServers() {
   const page = $('srv-page');
   if (!page) return;
+  // 재렌더로 지워지지 않게, 체크돼 있던 프로세스 PID 를 미리 기억한다.
+  const checked = new Set(
+    Array.from(page.querySelectorAll('.mem-chk:checked')).map((c) => Number(c.value)),
+  );
   try {
-    const d = await api('GET', '/servers');
-    page.innerHTML = renderServersHtml(d);
+    const [d, mem] = await Promise.all([
+      api('GET', '/servers'),
+      api('GET', '/processes').catch((e) => ({ error: e.message || String(e) })),
+    ]);
+    page.innerHTML = renderServersHtml(d) + renderMemHtml(mem);
+    // 이전 선택 복원 + 종료 버튼 연결
+    for (const pid of checked) {
+      const el = page.querySelector(`.mem-chk[value="${pid}"]`);
+      if (el) el.checked = true;
+    }
+    wireMemKill();
   } catch (e) {
     page.innerHTML = `<div class="empty">불러오지 못했어요: ${esc(e.message || String(e))}</div>`;
   }
+}
+
+// RAM 사용현황 — "서버 현황" 밑 섹션. 시스템 메모리 요약 + 프로세스별 사용량(상위).
+// 각 행에 체크박스가 있어 선택 후 '선택 종료'로 taskkill 한다. 서버 자신/보호 프로세스는
+// 체크박스가 비활성(서버가 거부하지만 UI 에서도 미리 막는다).
+function renderMemHtml(mem) {
+  if (!mem || mem.error) {
+    return `<div class="srv-grp">🧠 RAM 사용현황</div>
+      <div class="empty">RAM 정보를 불러오지 못했어요${mem && mem.error ? `: ${esc(mem.error)}` : ''}</div>`;
+  }
+  const procs = mem.procs || [];
+  const maxMb = procs.reduce((m, p) => Math.max(m, p.mb), 1);
+  const rows = procs.map((p) => {
+    const pct = Math.round((p.mb / maxMb) * 100);
+    const locked = p.self || p.protectedProc;
+    const tag = p.self ? ' <span class="mem-tag self">이 서버</span>'
+      : p.protectedProc ? ' <span class="mem-tag lock">보호됨</span>' : '';
+    return `
+      <label class="mem-row${locked ? ' locked' : ''}">
+        <input type="checkbox" class="mem-chk" value="${p.pid}" ${locked ? 'disabled' : ''}>
+        <span class="mem-name">${esc(p.name)}${tag}</span>
+        <span class="mem-pid">pid ${p.pid}</span>
+        <span class="mem-bar"><span class="mem-bar-fill" style="width:${pct}%"></span></span>
+        <span class="mem-mb">${p.mb} MB</span>
+      </label>`;
+  }).join('');
+  const usedGb = (mem.usedMb / 1024).toFixed(1);
+  const totGb = (mem.totalMb / 1024).toFixed(1);
+  const freeGb = (mem.freeMb / 1024).toFixed(1);
+  const warn = mem.usedPct >= 85 ? ' warn' : '';
+  return `
+    <div class="srv-grp mem-head">
+      <span>🧠 RAM 사용현황</span>
+      <button class="ghost danger" id="mem-kill" disabled>선택 종료</button>
+    </div>
+    <div class="mem-summary${warn}">
+      <span><b>${usedGb}</b> / ${totGb} GB 사용 (${mem.usedPct}%) · 여유 ${freeGb} GB</span>
+      <span class="mem-track"><span class="mem-track-fill" style="width:${mem.usedPct}%"></span></span>
+    </div>
+    ${rows || '<div class="empty">프로세스 정보 없음</div>'}`;
+}
+
+function wireMemKill() {
+  const page = $('srv-page');
+  if (!page) return;
+  const btn = $('mem-kill');
+  if (!btn) return;
+  const chks = () => Array.from(page.querySelectorAll('.mem-chk:checked'));
+  const sync = () => {
+    const n = chks().length;
+    btn.disabled = n === 0;
+    btn.textContent = n ? `선택 종료 (${n})` : '선택 종료';
+  };
+  page.querySelectorAll('.mem-chk').forEach((c) => c.addEventListener('change', sync));
+  sync();
+  btn.onclick = async () => {
+    const pids = chks().map((c) => Number(c.value));
+    if (!pids.length) return;
+    if (!confirm(`선택한 ${pids.length}개 프로세스를 강제 종료할까요?\npid: ${pids.join(', ')}`)) return;
+    btn.disabled = true;
+    const results = await Promise.all(
+      pids.map((pid) => api('POST', '/kill', { pid }).catch((e) => ({ ok: false, pid, reason: e.message || String(e) }))),
+    );
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length) {
+      alert('일부 종료 실패:\n' + failed.map((r) => `pid ${r.pid}: ${r.reason || '실패'}`).join('\n'));
+    }
+    refreshServers();
+  };
 }
 
 function renderServersHtml(d) {

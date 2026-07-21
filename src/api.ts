@@ -4,7 +4,7 @@ import { browse, defaultStartPath, isWithinRoot } from './browse.js';
 import { auxStatus, startAux, stopAux, type AuxKind } from './auxServers.js';
 import { saveUploads } from './uploads.js';
 import { getFolderFreq } from './folderFreq.js';
-import { serverStatus } from './servers.js';
+import { serverStatus, memStatus, killProcess } from './servers.js';
 import type { SessionManager } from './sessionManager.js';
 import type { InputFile, InputImage } from './types.js';
 
@@ -81,6 +81,27 @@ export function createApiRouter(manager: SessionManager): Router {
       res.json(await serverStatus());
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // RAM 사용현황 — 시스템 전체 메모리 + 프로세스별 사용량 상위 목록.
+  router.get('/processes', async (_req, res) => {
+    try {
+      res.json(await memStatus());
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // 선택 프로세스 종료 — 특정 PID 만. 서버 자신/OS 핵심 프로세스는 servers.ts 가드가 거부.
+  // body: { pid: number }
+  router.post('/kill', async (req, res) => {
+    const pid = Number((req.body ?? {}).pid);
+    if (!Number.isInteger(pid)) return res.status(400).json({ ok: false, reason: 'pid 필요' });
+    try {
+      res.json(await killProcess(pid));
+    } catch (e) {
+      res.status(500).json({ ok: false, pid, reason: e instanceof Error ? e.message : String(e) });
     }
   });
 
