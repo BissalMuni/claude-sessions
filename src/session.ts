@@ -80,6 +80,12 @@ const COMPACT_WINDOW = Math.min(
   Math.max(100_000, Number(process.env.SCREEN_COMPACT_WINDOW) || 100_000),
 );
 
+// 일시적 스트림 오류(네트워크 끊김·컴팩션 중 ECONNRESET·과부하 등) 자동 재시도 설정.
+// 이전엔 이런 오류 하나로 세션이 곧장 'error' 로 죽어(consume 의 catch) 폰에서 다시
+// 살릴 방법이 없었다. resume(sdkSessionId) 로 다시 붙어 지수 백오프로 N회까지 재시도한다.
+const STREAM_MAX_RETRIES = Math.max(0, Number(process.env.SCREEN_STREAM_MAX_RETRIES) || 3);
+const STREAM_RETRY_BASE_MS = Math.max(500, Number(process.env.SCREEN_STREAM_RETRY_BASE_MS) || 2000);
+
 // 모든 세션이 공유하는 '부팅 직렬화' 게이트.
 // Claude Code SDK 서브프로세스는 query() 를 만드는 순간이 아니라 "첫 사용자 입력"을
 // 받을 때 비로소 부팅하며, 그 과정에서 공유 파일 ~/.claude.json 을 읽고 다시 쓴다
@@ -175,6 +181,9 @@ export class Session {
   private releaseBoot: (() => void) | null = null;
   // 자동 컴팩션 임계값을 한 번만 적용하기 위한 가드 (init 은 컴팩션마다 다시 옴).
   private compactionApplied = false;
+  // 일시적 스트림 오류 재시도 상태. consumeRetries 는 '연속 실패' 횟수(성공 응답 오면 0).
+  private consumeRetries = 0;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: SessionOpts) {
     this.id = opts.id;
@@ -203,6 +212,14 @@ export class Session {
     if (this.started) return;
     this.started = true;
     if (this.stopped) return; // 이미 종료됐으면 띄우지 않는다
+    this.spawnQuery();
+  }
+
+  /**
+   * SDK query() 를 (재)생성하고 소비 루프를 건다. 최초 start() 와, 일시적 스트림 오류
+   * (ECONNRESET/컴팩션 끊김 등) 후 resume 재시도(scheduleRetry)에서 공용으로 쓴다.
+   */
+  private spawnQuery(): void {
     this.run = query({
       prompt: this.inputQueue,
       options: {
@@ -353,15 +370,53 @@ export class Session {
       // 의도적 종료(stop→abort)로 인한 throw 는 에러로 표시하지 않는다.
       // (에러 상태로 두면 touch→emit 이 삭제된 세션을 다시 저장/브로드캐스트한다)
       if (this.stopped) return;
-      this.error = err instanceof Error ? err.message : String(err);
-      this.logError(err);
+      const message = err instanceof Error ? err.message : String(err);
+      this.logError(err); // 원인은 재시도 성공/실패와 무관하게 항상 남긴다
+      // 일시적 네트워크/컴팩션 오류: 세션을 'error' 로 죽이지 않고 resume 으로 자동 재시도.
+      // resume 은 sdkSessionId 가 있어야 컨텍스트를 이어받으므로, 없으면 재시도 의미가 없다.
+      if (
+        this.sdkSessionId &&
+        this.consumeRetries < STREAM_MAX_RETRIES &&
+        isRetryableStreamError(message)
+      ) {
+        this.scheduleRetry(message);
+        return;
+      }
+      // 재시도 불가(복원 id 없음/일시적 오류 아님)·재시도 소진 → 진짜 오류로 표시.
+      this.error = message;
       this.addItem('error', this.error);
       this.setStatus('error');
     }
   }
 
+  /**
+   * 일시적 스트림 오류 후 지수 백오프로 resume 재접속을 예약한다.
+   * - 크래시한 이터레이터가 입력 큐에 남긴 대기 resolver 가 다음 입력을 삼키지 않도록
+   *   입력 큐를 새로 만든다(백오프 중 들어오는 입력은 새 큐에 쌓여 재접속 후 소비됨).
+   * - 새 run 에는 컴팩션 설정을 다시 걸어야 하므로 가드를 풀어 init 에서 재적용되게 한다.
+   */
+  private scheduleRetry(message: string): void {
+    this.consumeRetries += 1;
+    const delay = STREAM_RETRY_BASE_MS * 2 ** (this.consumeRetries - 1); // 2s → 4s → 8s …
+    this.addItem(
+      'system',
+      `⚠ 연결 오류 — ${Math.round(delay / 1000)}s 후 재시도 ${this.consumeRetries}/${STREAM_MAX_RETRIES}: ${message}`,
+    );
+    this.setStatus('starting'); // 재연결 중임을 폰에 표시
+    this.compactionApplied = false; // 새 run 에서 컴팩션 설정 재적용
+    this.inputQueue = new AsyncQueue<SDKUserMessage>(); // 죽은 이터레이터의 대기 resolver 폐기
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.stopped) return;
+      this.spawnQuery(); // resume(sdkSessionId) 로 다시 붙는다
+    }, delay);
+    // 재시도 타이머가 프로세스 종료를 붙잡지 않게 한다.
+    if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
+  }
+
   private handleMessage(msg: SDKMessage): void {
     this.markActivity(); // SDK 가 살아있다는 신호 → stall 시계 리셋
+    this.consumeRetries = 0; // SDK 가 다시 응답 → '연속 실패' 카운터 리셋
     switch (msg.type) {
       case 'system': {
         const sm = msg as Record<string, unknown>;
@@ -521,6 +576,10 @@ export class Session {
   stop(): void {
     this.stopped = true; // 이후 어떤 emit/save 도 막는다 → 삭제 후 부활 방지
     this.settleBoot(); // 부팅 게이트에서 대기 중이었다면 풀어 다음 세션 부팅을 막지 않는다
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer); // 예약된 재접속이 있으면 취소
+      this.retryTimer = null;
+    }
     rejectSessionPermissions(this.id);
     this.inputQueue.close();
     this.abort.abort();
@@ -635,6 +694,28 @@ export class Session {
       stalled: this.isStalled(),
     };
   }
+}
+
+// resume 재접속으로 회복 가능한(대개 일시적인) 스트림 오류인가?
+// 컴팩션 중 ECONNRESET/과부하/게이트웨이 오류 등 네트워크성 실패만 재시도 대상이다.
+// 논리 오류(잘못된 입력·인증 실패 등)는 재시도해도 같은 결과라 걸러낸다.
+function isRetryableStreamError(message: string): boolean {
+  const m = message.toLowerCase();
+  return [
+    'econnreset',
+    'etimedout',
+    'econnrefused',
+    'socket hang up',
+    'unable to connect',
+    'during compaction',
+    'fetch failed',
+    'network',
+    'overloaded',
+    '502',
+    '503',
+    '504',
+    '529',
+  ].some((needle) => m.includes(needle));
 }
 
 /** AskUserQuestion 입력에서 폰이 그릴 문항 목록을 뽑아낸다 */

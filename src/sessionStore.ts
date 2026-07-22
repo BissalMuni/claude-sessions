@@ -25,6 +25,7 @@ export interface PersistedSession {
   /** 세션 소유 계정 id(null/미지정=레거시/공유). 복원 후에도 격리를 유지하도록 저장. */
   ownerId?: string | null;
   sdkSessionId: string | null; // null 이면 resume 불가 → 빈 컨텍스트로 새로 시작
+  // 폰에 보여줄 표시용 기록. 종료(ended)된 세션은 []로 비운다(실제 대화는 SDK 트랜스크립트에 있음).
   messages: StreamItem[];
   createdAt: string;
   updatedAt: string;
@@ -43,17 +44,28 @@ let writeTimer: ReturnType<typeof setTimeout> | null = null;
 function load(): Map<string, PersistedSession> {
   if (cache) return cache;
   const map = new Map<string, PersistedSession>();
+  let pruned = false;
   try {
     const parsed = JSON.parse(readFileSync(STORE_FILE, 'utf8'));
     if (Array.isArray(parsed)) {
       for (const r of parsed) {
-        if (r && typeof r.id === 'string') map.set(r.id, r as PersistedSession);
+        if (r && typeof r.id === 'string') {
+          // 종료(보관)된 세션은 메시지를 보관하지 않는다(메타데이터만 유지).
+          // 실제 대화는 SDK 트랜스크립트(~/.claude/projects)에 남으므로 감사 손실 없음.
+          // 이 청소가 과거에 쌓인 종료 세션 메시지를 부팅 1회에 걷어내 파일을 줄인다.
+          if (r.ended && Array.isArray(r.messages) && r.messages.length > 0) {
+            r.messages = [];
+            pruned = true;
+          }
+          map.set(r.id, r as PersistedSession);
+        }
       }
     }
   } catch {
     /* 파일 없음/손상 → 빈 맵으로 시작 */
   }
   cache = map;
+  if (pruned) scheduleWrite(); // 걷어낸 결과를 디스크에 반영(디바운스)
   return map;
 }
 
@@ -92,7 +104,8 @@ export function saveSession(view: SessionView): void {
     root: view.root ?? null,
     ownerId: view.ownerId ?? null,
     sdkSessionId: view.sdkSessionId,
-    messages: view.messages,
+    // 종료된 세션은 메시지를 보관하지 않는다(방어: 뒤늦은 저장이 스트립을 되돌리지 않게).
+    messages: prev?.ended ? [] : view.messages,
     createdAt: view.createdAt,
     updatedAt: view.updatedAt,
     // 한 번 종료(보관) 표시된 세션은 이후 저장에서도 그 상태를 잃지 않게 보존.
@@ -107,6 +120,7 @@ export function markEnded(id: string): void {
   const rec = map.get(id);
   if (!rec || rec.ended) return;
   rec.ended = true;
+  rec.messages = []; // 종료 세션은 메시지 보관 안 함(메타데이터만) → 파일 비대 방지
   scheduleWrite();
 }
 
