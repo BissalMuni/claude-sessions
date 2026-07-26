@@ -338,6 +338,8 @@ input, textarea {
 .srv-sub { color: var(--muted); font-size: 13.6px; margin: 2px 0 0 17px; }
 .srv-proj { color: var(--accent); }
 .srv-muted { color: var(--muted); }
+/* 프로젝트 그룹 제목: 프로젝트 이름을 그대로(대문자 변환 없이) 강조색으로 */
+.srv-proj-grp { color: var(--accent); text-transform: none; font-size: 13px; }
 
 /* RAM 사용현황 (서버 현황 밑 섹션) */
 .srv-grp.mem-head { display: flex; align-items: center; justify-content: space-between; }

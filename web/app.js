@@ -1163,10 +1163,24 @@ function renderServersHtml(d) {
       ${sub ? `<div class="srv-sub">${sub}</div>` : ''}
     </div>`;
 
-  const knownRows = known.map((s) => {
-    const sub = `${esc(s.desc || '')}${s.project ? ` · <span class="srv-proj">${esc(s.project)}</span>` : ''}` +
-                `${s.up && s.pid ? ` · pid ${s.pid}` : ''}`;
-    return row(s.up, s.name, s.port, sub);
+  // 프로젝트별로 묶어 프로젝트 이름을 그룹 제목으로 표시한다(레지스트리 첫 등장 순서 유지).
+  // 같은 프로젝트의 서버들이 흩어져 있어도 한 제목 아래로 모인다(예: claudia 4개).
+  const groups = [];
+  const gIndex = new Map();
+  for (const s of known) {
+    const key = s.project || '(기타)';
+    let g = gIndex.get(key);
+    if (!g) { g = { project: key, servers: [] }; gIndex.set(key, g); groups.push(g); }
+    g.servers.push(s);
+  }
+  const knownRows = groups.map((g) => {
+    const rows = g.servers.map((s) => {
+      // 프로젝트는 그룹 제목으로 올렸으니 서브줄에선 뺀다(설명 · pid 만 남김).
+      const sub = `${esc(s.desc || '')}${s.up && s.pid ? ` · pid ${s.pid}` : ''}`;
+      return row(s.up, s.name, s.port, sub);
+    }).join('');
+    const upN = g.servers.filter((s) => s.up).length;
+    return `<div class="srv-grp srv-proj-grp">${esc(g.project)} <span class="srv-muted">${upN}/${g.servers.length}</span></div>${rows}`;
   }).join('');
 
   const otherRows = others.length
@@ -1179,7 +1193,7 @@ function renderServersHtml(d) {
   const hidden = d.hidden ? ` · <span class="srv-muted">시스템 ${d.hidden}개 숨김</span>` : '';
   return `
     <div class="srv-summary">고정 서버 <b>${upCount}/${known.length}</b> 실행 중${others.length ? ` · 기타 ${others.length}개` : ''}${hidden} · ${when}</div>
-    <div class="srv-grp">고정 서버</div>${knownRows}${otherRows}`;
+    ${knownRows}${otherRows}`;
 }
 
 // ---------- 시작 ----------
