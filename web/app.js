@@ -1157,11 +1157,16 @@ function renderServersHtml(d) {
   const known = d.known || [];
   const others = d.others || [];
   const dot = (up) => `<span class="srv-dot ${up ? 'up' : 'down'}"></span>`;
-  const row = (up, name, port, sub) => `
-    <div class="srv-row ${up ? 'up' : 'down'}">
-      <div class="srv-main">${dot(up)}<span class="srv-name">${esc(name)}</span><span class="srv-port">:${port}</span></div>
-      ${sub ? `<div class="srv-sub">${sub}</div>` : ''}
-    </div>`;
+  const row = (up, name, port, sub) => {
+    // 켜진 서버는 같은 호스트(폰이 접속한 IP)의 해당 포트를 새 탭으로 연다. 오른쪽 ↗ 는 링크 힌트.
+    // 꺼진 서버는 열 게 없으므로 링크 없이 평범한 줄로 둔다.
+    const inner = `
+      <div class="srv-main">${dot(up)}<span class="srv-name">${esc(name)}</span><span class="srv-port">:${port}</span>${up ? '<span class="srv-open">↗</span>' : ''}</div>
+      ${sub ? `<div class="srv-sub">${sub}</div>` : ''}`;
+    return up
+      ? `<a class="srv-row up srv-link" href="//${location.hostname}:${port}" target="_blank" rel="noopener">${inner}</a>`
+      : `<div class="srv-row down">${inner}</div>`;
+  };
 
   // 프로젝트별로 묶어 프로젝트 이름을 그룹 제목으로 표시한다(레지스트리 첫 등장 순서 유지).
   // 같은 프로젝트의 서버들이 흩어져 있어도 한 제목 아래로 모인다(예: claudia 4개).

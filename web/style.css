@@ -327,8 +327,12 @@ input, textarea {
   color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
   margin: 16px 0 6px; padding-bottom: 4px; border-bottom: 1px solid var(--line);
 }
-.srv-row { padding: 9px 4px; border-bottom: 1px solid var(--line); }
+.srv-row { display: block; padding: 9px 4px; border-bottom: 1px solid var(--line); }
 .srv-row.down { opacity: .5; }
+/* 켜진 서버 줄은 링크 — 기본 링크 색/밑줄을 지우고 탭 시 살짝 강조만 준다 */
+.srv-link { color: inherit; text-decoration: none; -webkit-tap-highlight-color: transparent; }
+.srv-link:active { background: var(--line); border-radius: 6px; }
+.srv-open { margin-left: auto; color: var(--accent); font-size: 14.4px; flex: none; }
 .srv-main { display: flex; align-items: center; gap: 8px; }
 .srv-dot { width: 9px; height: 9px; border-radius: 999px; flex: none; }
 .srv-dot.up { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,.6); }
