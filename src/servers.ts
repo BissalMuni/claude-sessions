@@ -222,6 +222,59 @@ export async function memStatus(top = 30): Promise<MemStatus> {
   return { at: new Date().toISOString(), totalMb, freeMb, usedMb, usedPct, procs: rows.slice(0, top) };
 }
 
+// ---------- 앱별 프로세스 목록 ----------
+// "서버 현황"에서 VS Code/Edge/Chrome 처럼 인스턴스가 여러 개로 흩어지는 GUI 앱을
+// 이미지명으로 묶어 보여주고, 골라서(또는 그룹째) 종료할 수 있게 한다. RAM 탭은 상위 30개만
+// 보여줘서 18개짜리 VS Code 전부를 볼 수 없기에, 이 목록은 대상 앱의 '모든' 인스턴스를 준다.
+
+export interface AppProc { pid: number; mb: number; protectedProc: boolean; self: boolean }
+export interface AppGroup { app: string; label: string; count: number; totalMb: number; procs: AppProc[] }
+export interface AppProcStatus { at: string; groups: AppGroup[] }
+
+// 묶어서 보여줄 대상 GUI 앱(이미지명 소문자 → 표시 라벨). node/claude 는 컨트롤러·세션이라
+// 일부러 넣지 않는다(실수로 제어를 끊는 걸 막는다). 필요하면 여기만 늘리면 된다.
+const APP_TARGETS: { image: string; label: string }[] = [
+  { image: 'code.exe', label: 'VS Code' },
+  { image: 'chrome.exe', label: 'Chrome' },
+  { image: 'msedge.exe', label: 'Edge' },
+];
+
+/** 대상 앱들의 모든 인스턴스를 이미지명으로 묶어 반환(각 그룹은 메모리 내림차순). */
+export async function appProcesses(): Promise<AppProcStatus> {
+  const out = await tasklistCsv();
+  const self = process.pid;
+  const byImage = new Map<string, AppProc[]>();
+  for (const line of out.split(/\r?\n/)) {
+    // "이미지명","PID","세션이름","세션#","메모리 사용"
+    const m = line.match(/^"([^"]*)","(\d+)","[^"]*","[^"]*","([^"]*)"/);
+    if (!m) continue;
+    const image = m[1].trim().toLowerCase();
+    if (!APP_TARGETS.some((t) => t.image === image)) continue;
+    const pid = Number(m[2]);
+    const arr = byImage.get(image) ?? [];
+    arr.push({
+      pid,
+      mb: parseMemKb(m[3]),
+      self: pid === self, // 대상 앱엔 컨트롤러가 없지만, 방어적으로 표시(종료 UI 잠금)
+      protectedProc: PROTECTED_PIDS.has(pid),
+    });
+    byImage.set(image, arr);
+  }
+  const groups: AppGroup[] = [];
+  for (const t of APP_TARGETS) {
+    const procs = (byImage.get(t.image) ?? []).sort((a, b) => b.mb - a.mb);
+    if (!procs.length) continue;
+    groups.push({
+      app: t.image,
+      label: t.label,
+      count: procs.length,
+      totalMb: procs.reduce((s, p) => s + p.mb, 0),
+      procs,
+    });
+  }
+  return { at: new Date().toISOString(), groups };
+}
+
 export interface KillResult { ok: boolean; pid: number; reason?: string }
 
 /**

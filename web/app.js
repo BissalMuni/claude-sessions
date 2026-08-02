@@ -1068,11 +1068,12 @@ async function refreshServers() {
     Array.from(page.querySelectorAll('.mem-chk:checked')).map((c) => Number(c.value)),
   );
   try {
-    const [d, mem] = await Promise.all([
+    const [d, apps, mem] = await Promise.all([
       api('GET', '/servers'),
+      api('GET', '/app-processes').catch((e) => ({ error: e.message || String(e) })),
       api('GET', '/processes').catch((e) => ({ error: e.message || String(e) })),
     ]);
-    page.innerHTML = renderServersHtml(d) + renderMemHtml(mem);
+    page.innerHTML = renderServersHtml(d) + renderAppProcsHtml(apps) + renderMemHtml(mem);
     // 이전 선택 복원 + 종료 버튼 연결
     for (const pid of checked) {
       const el = page.querySelector(`.mem-chk[value="${pid}"]`);
@@ -1082,6 +1083,48 @@ async function refreshServers() {
   } catch (e) {
     page.innerHTML = `<div class="empty">불러오지 못했어요: ${esc(e.message || String(e))}</div>`;
   }
+}
+
+// 앱 프로세스 — VS Code/Edge/Chrome 인스턴스를 앱으로 묶어 보여준다. 앱 헤더 체크박스로
+// 그룹 전체를 한 번에 선택, 행 체크박스로 개별 선택 → '선택 종료'로 taskkill. 체크박스는
+// RAM 섹션과 같은 .mem-chk 를 써서 wireMemKill 이 두 섹션을 통합 처리한다(종료 버튼 공유).
+function renderAppProcsHtml(apps) {
+  if (!apps || apps.error) {
+    return `<div class="srv-grp">🧩 앱 프로세스</div>
+      <div class="empty">앱 프로세스를 불러오지 못했어요${apps && apps.error ? `: ${esc(apps.error)}` : ''}</div>`;
+  }
+  const groups = apps.groups || [];
+  if (!groups.length) {
+    return `<div class="srv-grp mem-head"><span>🧩 앱 프로세스</span></div>
+      <div class="empty">실행 중인 VS Code·Edge·Chrome 없음</div>`;
+  }
+  const sections = groups.map((g) => {
+    const rows = g.procs.map((p) => {
+      const locked = p.self || p.protectedProc;
+      return `
+      <label class="mem-row app-row${locked ? ' locked' : ''}">
+        <input type="checkbox" class="mem-chk" value="${p.pid}" data-app="${esc(g.app)}" ${locked ? 'disabled' : ''}>
+        <span class="mem-name">${esc(g.label)}</span>
+        <span class="mem-pid">pid ${p.pid}</span>
+        <span class="mem-mb">${p.mb} MB</span>
+      </label>`;
+    }).join('');
+    return `
+      <div class="app-grp-head">
+        <label class="app-grp-sel">
+          <input type="checkbox" class="app-grp-chk" data-app="${esc(g.app)}">
+          <span class="app-grp-name">${esc(g.label)}</span>
+        </label>
+        <span class="app-grp-meta">${g.count}개 · ${g.totalMb} MB</span>
+      </div>
+      ${rows}`;
+  }).join('');
+  return `
+    <div class="srv-grp mem-head">
+      <span>🧩 앱 프로세스</span>
+      <button class="ghost danger kill-btn" id="app-kill" disabled>선택 종료</button>
+    </div>
+    ${sections}`;
 }
 
 // RAM 사용현황 — "서버 현황" 밑 섹션. 시스템 메모리 요약 + 프로세스별 사용량(상위).
@@ -1115,7 +1158,7 @@ function renderMemHtml(mem) {
   return `
     <div class="srv-grp mem-head">
       <span>🧠 RAM 사용현황</span>
-      <button class="ghost danger" id="mem-kill" disabled>선택 종료</button>
+      <button class="ghost danger kill-btn" id="mem-kill" disabled>선택 종료</button>
     </div>
     <div class="mem-summary${warn}">
       <span><b>${usedGb}</b> / ${totGb} GB 사용 (${mem.usedPct}%) · 여유 ${freeGb} GB</span>
@@ -1124,24 +1167,45 @@ function renderMemHtml(mem) {
     ${rows || '<div class="empty">프로세스 정보 없음</div>'}`;
 }
 
+// 앱 프로세스 섹션과 RAM 섹션이 같은 .mem-chk 체크박스를 공유한다. 두 섹션의 '선택 종료'
+// 버튼(.kill-btn)은 전체 선택분을 함께 종료하고, 앱 그룹 헤더 체크박스(.app-grp-chk)는
+// 그 앱의 (비잠금) 행을 한 번에 토글한다.
 function wireMemKill() {
   const page = $('srv-page');
   if (!page) return;
-  const btn = $('mem-kill');
-  if (!btn) return;
+  const buttons = Array.from(page.querySelectorAll('.kill-btn'));
+  if (!buttons.length) return;
   const chks = () => Array.from(page.querySelectorAll('.mem-chk:checked'));
   const sync = () => {
     const n = chks().length;
-    btn.disabled = n === 0;
-    btn.textContent = n ? `선택 종료 (${n})` : '선택 종료';
+    buttons.forEach((b) => {
+      b.disabled = n === 0;
+      b.textContent = n ? `선택 종료 (${n})` : '선택 종료';
+    });
+    // 그룹 헤더 상태 갱신: 그 앱 행이 모두 선택 → 체크, 일부만 → indeterminate.
+    page.querySelectorAll('.app-grp-chk').forEach((g) => {
+      const app = g.getAttribute('data-app');
+      const rows = Array.from(page.querySelectorAll(`.mem-chk[data-app="${app}"]:not([disabled])`));
+      const on = rows.filter((r) => r.checked).length;
+      g.checked = rows.length > 0 && on === rows.length;
+      g.indeterminate = on > 0 && on < rows.length;
+    });
   };
   page.querySelectorAll('.mem-chk').forEach((c) => c.addEventListener('change', sync));
+  page.querySelectorAll('.app-grp-chk').forEach((g) => {
+    g.addEventListener('change', () => {
+      const app = g.getAttribute('data-app');
+      page.querySelectorAll(`.mem-chk[data-app="${app}"]:not([disabled])`)
+        .forEach((r) => { r.checked = g.checked; });
+      sync();
+    });
+  });
   sync();
-  btn.onclick = async () => {
+  const doKill = async () => {
     const pids = chks().map((c) => Number(c.value));
     if (!pids.length) return;
     if (!confirm(`선택한 ${pids.length}개 프로세스를 강제 종료할까요?\npid: ${pids.join(', ')}`)) return;
-    btn.disabled = true;
+    buttons.forEach((b) => { b.disabled = true; });
     const results = await Promise.all(
       pids.map((pid) => api('POST', '/kill', { pid }).catch((e) => ({ ok: false, pid, reason: e.message || String(e) }))),
     );
@@ -1151,6 +1215,7 @@ function wireMemKill() {
     }
     refreshServers();
   };
+  buttons.forEach((b) => { b.onclick = doKill; });
 }
 
 function renderServersHtml(d) {

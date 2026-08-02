@@ -4,7 +4,7 @@ import { browse, defaultStartPath, isWithinRoot } from './browse.js';
 import { auxStatus, startAux, stopAux, type AuxKind } from './auxServers.js';
 import { saveUploads } from './uploads.js';
 import { getFolderFreq } from './folderFreq.js';
-import { serverStatus, memStatus, killProcess } from './servers.js';
+import { serverStatus, memStatus, killProcess, appProcesses } from './servers.js';
 import type { SessionManager } from './sessionManager.js';
 import type { InputFile, InputImage } from './types.js';
 
@@ -88,6 +88,15 @@ export function createApiRouter(manager: SessionManager): Router {
   router.get('/processes', async (_req, res) => {
     try {
       res.json(await memStatus());
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // 앱별 프로세스 목록 — VS Code/Edge/Chrome 인스턴스를 묶어서(모든 인스턴스) 반환.
+  router.get('/app-processes', async (_req, res) => {
+    try {
+      res.json(await appProcesses());
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }
