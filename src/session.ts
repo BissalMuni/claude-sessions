@@ -581,12 +581,20 @@ export class Session {
   private async applyCompactionSettings(): Promise<void> {
     try {
       // Settings 키(autoCompactEnabled/autoCompactWindow)를 런타임 설정 레이어에 병합.
-      await this.run?.applyFlagSettings({
+      if (!this.run) {
+        this.logError(`[compaction] run 이 없어 설정을 못 걸었다 (window=${COMPACT_WINDOW})`);
+        return;
+      }
+      await this.run.applyFlagSettings({
         autoCompactEnabled: true,
         autoCompactWindow: COMPACT_WINDOW,
       } as Record<string, unknown>);
-    } catch {
-      /* 컴팩션 설정 실패가 세션을 죽이면 안 된다 */
+      // 실측 결과 컴팩션이 한 번도 안 걸린 적이 있다(마커 0건). 성공도 남겨야
+      // '적용은 됐는데 안 걸리는지' vs '적용 자체가 실패하는지'를 가릴 수 있다.
+      this.logError(`[compaction] 적용됨 window=${COMPACT_WINDOW}`);
+    } catch (err) {
+      // 삼키면 컴팩션이 안 걸려도 영영 모른다 — 세션은 살리되 기록은 남긴다.
+      this.logError(`[compaction] 적용 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
