@@ -109,6 +109,10 @@ const LOG_DIR = join(process.cwd(), 'logs');
 // 모든 세션의 SDK 스트림 오류(=폰이 보는 "CLI 응답 에러")를 한 파일에 모아 남긴다.
 // stderr(logs/<id>.log)로는 안 잡히는, for await 루프에서 던져진 예외를 여기서 포착한다.
 const ERROR_LOG = join(LOG_DIR, 'errors.log');
+// 응답 지연 진단: 턴마다 TTFT(첫 토큰까지)·총시간·컨텍스트 토큰·캐시 히트를 logs/perf.log 에
+// 남기고, SCREEN_PERF=1 이면 폰 화면에도 한 줄로 보여준다(어디서 몇 초 걸리는지 실측용).
+const PERF_LOG = join(LOG_DIR, 'perf.log');
+const PERF_SHOW = process.env.SCREEN_PERF === '1';
 
 // 로컬 스킬 플러그인(절대경로). src/ 든 dist/ 든 항상 설치 루트의 skills-plugin/ 을
 // 가리킨다. 세션 cwd 와 무관하게 모든 세션에 같은 스킬 묶음을 주입하기 위함.
@@ -184,6 +188,10 @@ export class Session {
   // 일시적 스트림 오류 재시도 상태. consumeRetries 는 '연속 실패' 횟수(성공 응답 오면 0).
   private consumeRetries = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  // 응답 지연 계측(진단용). 턴 시작 시각과 첫 토큰 도착 여부로 TTFT/총시간을 잰다.
+  private turnStartMs: number | null = null;
+  private firstTokenSeen = false;
+  private ttftMs = 0;
 
   constructor(opts: SessionOpts) {
     this.id = opts.id;
@@ -453,6 +461,11 @@ export class Session {
       }
 
       case 'assistant': {
+        // 첫 토큰 도착(TTFT) — 프롬프트→첫 응답까지 몇 초 걸렸는지. 느림의 핵심 지표.
+        if (!this.firstTokenSeen && this.turnStartMs != null) {
+          this.firstTokenSeen = true;
+          this.ttftMs = Date.now() - this.turnStartMs;
+        }
         const blocks = (msg.message.content ?? []) as unknown as Array<Record<string, unknown>>;
         for (const block of blocks) {
           if (block.type === 'text' && typeof block.text === 'string') {
@@ -471,6 +484,7 @@ export class Session {
         if (msg.subtype !== 'success') {
           this.addItem('result', `(${msg.subtype})`);
         }
+        this.recordPerf(msg as Record<string, unknown>); // 응답 지연 실측 기록
         this.setStatus('idle'); // 턴 완료 → 다음 입력 대기
         break;
       }
@@ -531,6 +545,8 @@ export class Session {
       parent_tool_use_id: null,
     });
     this.lastActivityAt = Date.now(); // SDK 응답을 기다리기 시작 → stall 시계 시작
+    this.turnStartMs = this.lastActivityAt; // 지연 계측 시작
+    this.firstTokenSeen = false;
     this.stalled = false;
     this.setStatus('thinking');
   }
@@ -663,6 +679,43 @@ export class Session {
     } catch {
       /* 로깅 실패가 세션을 죽이면 안 된다 */
     }
+  }
+
+  /**
+   * 응답 지연 실측. result 메시지의 SDK 자체 타이밍(duration_ms=전체, duration_api_ms=모델 API)과
+   * usage(입력·캐시읽기·출력 토큰)를 뽑아 logs/perf.log 에 남기고, SCREEN_PERF=1 이면 폰에도 한 줄.
+   * 이걸로 "느림이 모델 처리(api_ms)인지, 컨텍스트가 큰지, 캐시가 안 먹는지"를 숫자로 가른다.
+   */
+  private recordPerf(rm: Record<string, unknown>): void {
+    try {
+      const wall = this.turnStartMs != null ? Date.now() - this.turnStartMs : 0;
+      this.turnStartMs = null;
+      const durTotal = Number(rm.duration_ms) || 0;
+      const durApi = Number(rm.duration_api_ms) || 0;
+      const u = (rm.usage ?? {}) as Record<string, number>;
+      const input = Number(u.input_tokens) || 0;
+      const cacheRead = Number(u.cache_read_input_tokens) || 0;
+      const cacheWrite = Number(u.cache_creation_input_tokens) || 0;
+      const output = Number(u.output_tokens) || 0;
+      const ctx = input + cacheRead + cacheWrite; // 이번 턴이 실제로 읽은 컨텍스트 크기
+      const s = (n: number) => (n / 1000).toFixed(1) + 's';
+      const k = (n: number) => Math.round(n / 1000) + 'k';
+      const cacheHitPct = ctx ? Math.round((cacheRead / ctx) * 100) : 0;
+      // 캐시 히트율이 낮으면 매 턴 큰 컨텍스트를 새로 읽는 것 → 느림·고비용의 직접 원인.
+      const line =
+        `⏱ ${s(wall)} (첫토큰 ${s(this.ttftMs)} · 모델 ${s(durApi)}) · ` +
+        `컨텍스트 ${k(ctx)}(캐시 ${cacheHitPct}%) · 출력 ${k(output)}`;
+      try {
+        if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+        appendFileSync(
+          PERF_LOG,
+          `[${new Date().toISOString()}] ${this.id} "${this.title}" ${line} ` +
+            `[raw wall=${wall} ttft=${this.ttftMs} total=${durTotal} api=${durApi} ` +
+            `in=${input} cacheR=${cacheRead} cacheW=${cacheWrite} out=${output}]\n`,
+        );
+      } catch { /* 로깅 실패가 세션을 죽이면 안 된다 */ }
+      if (PERF_SHOW) this.addItem('system', line);
+    } catch { /* 계측 실패가 세션을 죽이면 안 된다 */ }
   }
 
   /** SDK 서브프로세스 stderr/디버그 출력을 세션별 파일에 적재. 실패는 무시. */
