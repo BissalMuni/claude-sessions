@@ -197,6 +197,9 @@ export class Session {
   private toolSpanMs = 0;
   private toolStartMs: number | null = null;
   private toolCount = 0;
+  // SDK 의 duration_api_ms 는 '이번 턴'이 아니라 세션 시작부터의 누적값이다.
+  // 턴별 모델 시간을 얻으려면 직전 값과의 차이를 써야 한다.
+  private lastDurApiMs = -1; // -1 = 아직 기준값 없음(세션 첫 result)
 
   constructor(opts: SessionOpts) {
     this.id = opts.id;
@@ -714,7 +717,14 @@ export class Session {
       const wall = this.turnStartMs != null ? Date.now() - this.turnStartMs : 0;
       this.turnStartMs = null;
       const durTotal = Number(rm.duration_ms) || 0;
-      const durApi = Number(rm.duration_api_ms) || 0;
+      const durApiCum = Number(rm.duration_api_ms) || 0;
+      // 누적값 → 턴별 값으로 환산. 재개(resume) 등으로 값이 되감기면 그대로 쓴다.
+      // 세션 첫 result 는 기준값이 없어 델타를 만들 수 없다 → 모델 시간 '미상'으로 두고 기준만 세운다.
+      const apiKnown = this.lastDurApiMs >= 0;
+      const durApi = !apiKnown ? 0 : durApiCum >= this.lastDurApiMs ? durApiCum - this.lastDurApiMs : durApiCum;
+      this.lastDurApiMs = durApiCum;
+      // turnStartMs 가 없던 턴(도구 연쇄·복원 직후 등)은 SDK 의 duration_ms 를 기준으로 삼는다.
+      const base = wall > 0 ? wall : durTotal;
       const u = (rm.usage ?? {}) as Record<string, number>;
       const input = Number(u.input_tokens) || 0;
       const cacheRead = Number(u.cache_read_input_tokens) || 0;
@@ -731,18 +741,23 @@ export class Session {
       }
       // 모델도 도구도 아닌 시간 = 순수 오버헤드(직렬화·브로드캐스트·파이프 백프레셔 등).
       // 이 값이 크면 우리 코드 문제, 작으면 지연은 모델/도구의 정당한 소요다.
-      const overhead = Math.max(0, wall - durApi - this.toolSpanMs);
+      const overhead = Math.max(0, base - durApi - this.toolSpanMs);
+      const modelTxt = apiKnown ? s(durApi) : '-';
+      const overTxt = apiKnown ? s(overhead) : '-';
+      // 이번 턴에 첫 토큰을 못 본 경우 ttftMs 는 이전 턴 값이라 신뢰할 수 없다 → '-' 로 표기.
+      const ttft = this.firstTokenSeen ? s(this.ttftMs) : '-';
       // 캐시 히트율이 낮으면 매 턴 큰 컨텍스트를 새로 읽는 것 → 느림·고비용의 직접 원인.
       const line =
-        `⏱ ${s(wall)} (첫토큰 ${s(this.ttftMs)} · 모델 ${s(durApi)} · ` +
-        `도구 ${s(this.toolSpanMs)}×${this.toolCount} · 그외 ${s(overhead)}) · ` +
+        `⏱ ${s(base)} (첫토큰 ${ttft} · 모델 ${modelTxt} · ` +
+        `도구 ${s(this.toolSpanMs)}×${this.toolCount} · 그외 ${overTxt}) · ` +
         `컨텍스트 ${k(ctx)}(캐시 ${cacheHitPct}%) · 출력 ${k(output)}`;
       try {
         if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
         appendFileSync(
           PERF_LOG,
           `[${new Date().toISOString()}] ${this.id} "${this.title}" ${line} ` +
-            `[raw wall=${wall} ttft=${this.ttftMs} total=${durTotal} api=${durApi} ` +
+            `[raw wall=${wall} base=${base} ttft=${this.firstTokenSeen ? this.ttftMs : -1} ` +
+            `total=${durTotal} api=${durApi} apiCum=${durApiCum} ` +
             `tools=${this.toolSpanMs}/${this.toolCount} overhead=${overhead} ` +
             `in=${input} cacheR=${cacheRead} cacheW=${cacheWrite} out=${output}]\n`,
         );
