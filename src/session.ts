@@ -192,6 +192,11 @@ export class Session {
   private turnStartMs: number | null = null;
   private firstTokenSeen = false;
   private ttftMs = 0;
+  // 도구 실행에 쓴 시간(tool_use → tool_result 구간의 합). 턴 전체에서 모델 시간과
+  // 이 값을 빼면 남는 게 '순수 오버헤드'(직렬화·파이프 백프레셔 등)라 원인을 가를 수 있다.
+  private toolSpanMs = 0;
+  private toolStartMs: number | null = null;
+  private toolCount = 0;
 
   constructor(opts: SessionOpts) {
     this.id = opts.id;
@@ -467,13 +472,18 @@ export class Session {
           this.ttftMs = Date.now() - this.turnStartMs;
         }
         const blocks = (msg.message.content ?? []) as unknown as Array<Record<string, unknown>>;
+        let sawTool = false;
         for (const block of blocks) {
           if (block.type === 'text' && typeof block.text === 'string') {
             this.addItem('text', block.text);
           } else if (block.type === 'tool_use') {
             this.addItem('tool', summarizeToolInput(String(block.name), block.input));
+            sawTool = true;
+            this.toolCount += 1;
           }
         }
+        // 도구 호출이 나왔다 → 여기서부터 tool_result 가 돌아올 때까지가 '도구 대기' 구간
+        if (sawTool && this.toolStartMs == null) this.toolStartMs = Date.now();
         this.setStatus('thinking');
         break;
       }
@@ -489,8 +499,18 @@ export class Session {
         break;
       }
 
+      case 'user': {
+        // tool_result 가 돌아온 시점 → 도구 대기 구간 종료. (사용자 입력 replay 도 여기로 오지만
+        // toolStartMs 가 null 이면 그냥 지나간다.)
+        if (this.toolStartMs != null) {
+          this.toolSpanMs += Date.now() - this.toolStartMs;
+          this.toolStartMs = null;
+        }
+        break;
+      }
+
       default:
-        break; // stream_event(부분)·user replay 등은 무시
+        break; // stream_event(부분) 등은 무시
     }
   }
 
@@ -547,6 +567,9 @@ export class Session {
     this.lastActivityAt = Date.now(); // SDK 응답을 기다리기 시작 → stall 시계 시작
     this.turnStartMs = this.lastActivityAt; // 지연 계측 시작
     this.firstTokenSeen = false;
+    this.toolSpanMs = 0;
+    this.toolStartMs = null;
+    this.toolCount = 0;
     this.stalled = false;
     this.setStatus('thinking');
   }
@@ -701,9 +724,18 @@ export class Session {
       const s = (n: number) => (n / 1000).toFixed(1) + 's';
       const k = (n: number) => Math.round(n / 1000) + 'k';
       const cacheHitPct = ctx ? Math.round((cacheRead / ctx) * 100) : 0;
+      // 아직 안 닫힌 도구 구간이 있으면(결과 없이 턴이 끝난 경우) 여기서 마감한다.
+      if (this.toolStartMs != null) {
+        this.toolSpanMs += Date.now() - this.toolStartMs;
+        this.toolStartMs = null;
+      }
+      // 모델도 도구도 아닌 시간 = 순수 오버헤드(직렬화·브로드캐스트·파이프 백프레셔 등).
+      // 이 값이 크면 우리 코드 문제, 작으면 지연은 모델/도구의 정당한 소요다.
+      const overhead = Math.max(0, wall - durApi - this.toolSpanMs);
       // 캐시 히트율이 낮으면 매 턴 큰 컨텍스트를 새로 읽는 것 → 느림·고비용의 직접 원인.
       const line =
-        `⏱ ${s(wall)} (첫토큰 ${s(this.ttftMs)} · 모델 ${s(durApi)}) · ` +
+        `⏱ ${s(wall)} (첫토큰 ${s(this.ttftMs)} · 모델 ${s(durApi)} · ` +
+        `도구 ${s(this.toolSpanMs)}×${this.toolCount} · 그외 ${s(overhead)}) · ` +
         `컨텍스트 ${k(ctx)}(캐시 ${cacheHitPct}%) · 출력 ${k(output)}`;
       try {
         if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
@@ -711,6 +743,7 @@ export class Session {
           PERF_LOG,
           `[${new Date().toISOString()}] ${this.id} "${this.title}" ${line} ` +
             `[raw wall=${wall} ttft=${this.ttftMs} total=${durTotal} api=${durApi} ` +
+            `tools=${this.toolSpanMs}/${this.toolCount} overhead=${overhead} ` +
             `in=${input} cacheR=${cacheRead} cacheW=${cacheWrite} out=${output}]\n`,
         );
       } catch { /* 로깅 실패가 세션을 죽이면 안 된다 */ }
