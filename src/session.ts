@@ -592,9 +592,32 @@ export class Session {
       // 실측 결과 컴팩션이 한 번도 안 걸린 적이 있다(마커 0건). 성공도 남겨야
       // '적용은 됐는데 안 걸리는지' vs '적용 자체가 실패하는지'를 가릴 수 있다.
       this.logError(`[compaction] 적용됨 window=${COMPACT_WINDOW}`);
+      // 적용됐다고 해서 CLI 가 그 값을 임계값으로 쓴다는 보장은 없다.
+      // SDK 에 직접 물어 '실제 임계값/활성화 여부'를 확인한다.
+      void this.logContextUsage('apply');
     } catch (err) {
       // 삼키면 컴팩션이 안 걸려도 영영 모른다 — 세션은 살리되 기록은 남긴다.
       this.logError(`[compaction] 적용 실패: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * SDK 에 현재 컨텍스트 사용량과 '실제' 자동 컴팩션 임계값을 물어 로그에 남긴다.
+   * applyFlagSettings 가 성공해도 CLI 가 그 값을 임계값으로 쓰는지는 별개라, 이 값이
+   * 우리가 건 window 와 다르면 설정이 트리거 경로까지 닿지 않았다는 뜻이다.
+   */
+  private async logContextUsage(tag: string): Promise<void> {
+    try {
+      const u = await this.run?.getContextUsage();
+      if (!u) return;
+      const k = (n: number | undefined) => (n == null ? '-' : Math.round(n / 1000) + 'k');
+      this.logError(
+        `[context/${tag}] total=${k(u.totalTokens)} max=${k(u.maxTokens)} ` +
+          `rawMax=${k(u.rawMaxTokens)} pct=${Math.round(u.percentage ?? 0)}% ` +
+          `autoCompactThreshold=${k(u.autoCompactThreshold)} enabled=${u.isAutoCompactEnabled}`,
+      );
+    } catch (err) {
+      this.logError(`[context/${tag}] 조회 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -771,6 +794,8 @@ export class Session {
         );
       } catch { /* 로깅 실패가 세션을 죽이면 안 된다 */ }
       if (PERF_SHOW) this.addItem('system', line);
+      // 턴마다 실제 컨텍스트가 임계값을 넘고도 압축이 안 걸리는지 추적한다.
+      void this.logContextUsage('turn');
     } catch { /* 계측 실패가 세션을 죽이면 안 된다 */ }
   }
 
