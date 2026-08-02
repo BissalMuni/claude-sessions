@@ -18,7 +18,7 @@ const REGISTRY: ServerEntry[] = [
   { port: 8787, name: '세션 컨트롤러', desc: '자율세션 원격 감시 (이 서버)', project: 'claude-sessions' },
   { port: 8788, name: '허브 백엔드', desc: 'API/WS · /health', project: 'claudia' },
   { port: 8789, name: '리포트 뷰어', desc: '일일 다이제스트 열람(폰)', project: 'claudia' },
-  { port: 5174, name: '웹 대시보드(dev)', desc: 'Vite 대시보드', project: 'claudia' },
+  { port: 5175, name: '웹 대시보드(dev)', desc: 'Vite 대시보드', project: 'claudia' },
   { port: 9099, name: '캡처 갤러리', desc: 'img-server', project: 'claudia' },
   { port: 8790, name: '문서/노트 서버', desc: 'server.js', project: 'readwrite' },
   { port: 8791, name: '업로드 서버(보조)', desc: 'aux upload', project: 'claude-sessions' },
