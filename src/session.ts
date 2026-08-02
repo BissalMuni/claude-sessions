@@ -8,6 +8,7 @@ import { shortId } from './ids.js';
 import { registerPermission, registerQuestion, rejectSessionPermissions } from './permissions.js';
 import { offendingToolPath } from './toolGuard.js';
 import type {
+  ContextUsage,
   InputImage,
   PendingPermission,
   PendingQuestion,
@@ -197,6 +198,8 @@ export class Session {
   private toolSpanMs = 0;
   private toolStartMs: number | null = null;
   private toolCount = 0;
+  // 폰에 보여줄 컨텍스트 사용량. SDK 기동 전에는 알 수 없어 null.
+  private contextUsage: ContextUsage | null = null;
   // SDK 의 duration_api_ms 는 '이번 턴'이 아니라 세션 시작부터의 누적값이다.
   // 턴별 모델 시간을 얻으려면 직전 값과의 차이를 써야 한다.
   private lastDurApiMs = -1; // -1 = 아직 기준값 없음(세션 첫 result)
@@ -610,6 +613,14 @@ export class Session {
     try {
       const u = await this.run?.getContextUsage();
       if (!u) return;
+      // 폰 표시용으로 보관 → view() 에 실려 WS 로 나간다.
+      this.contextUsage = {
+        total: u.totalTokens ?? 0,
+        max: u.maxTokens ?? 0,
+        pct: Math.round(u.percentage ?? 0),
+        compactAt: u.autoCompactThreshold ?? null,
+      };
+      this.scheduleEmit();
       const k = (n: number | undefined) => (n == null ? '-' : Math.round(n / 1000) + 'k');
       this.logError(
         `[context/${tag}] total=${k(u.totalTokens)} max=${k(u.maxTokens)} ` +
@@ -826,6 +837,7 @@ export class Session {
       updatedAt: this.updatedAt,
       error: this.error,
       stalled: this.isStalled(),
+      context: this.contextUsage,
     };
   }
 }

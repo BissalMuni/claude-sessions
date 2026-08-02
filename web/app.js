@@ -88,7 +88,8 @@ function startPolling() {
 // 세션 상태의 변화 지문(updatedAt 등). 같으면 다시 그릴 필요가 없다.
 function sessionsSig(list) {
   return list
-    .map((s) => `${s.id}:${s.updatedAt}:${s.stalled ? 1 : 0}:${s.pending ? s.pending.requestId : ''}:${s.question ? s.question.requestId : ''}`)
+    // 컨텍스트 총량도 지문에 넣는다. 안 넣으면 updatedAt 이 그대로일 때 링이 안 갱신된다.
+    .map((s) => `${s.id}:${s.updatedAt}:${s.stalled ? 1 : 0}:${s.context ? s.context.total : ''}:${s.pending ? s.pending.requestId : ''}:${s.question ? s.question.requestId : ''}`)
     .sort()
     .join('|');
 }
@@ -268,6 +269,23 @@ function statusBadge(s) {
   return `<span class="badge ${s.status}${s.stalled ? ' stalled' : ''}">${label}</span>`;
 }
 
+// 컨텍스트 사용량 링. VS Code 확장의 원형 게이지와 같은 데이터(SDK getContextUsage)다.
+// 폰에는 잔여가 전혀 안 보여서 컨텍스트가 조용히 불어나도 알 수 없었고, 그게 곧 느림이었다.
+function contextRing(s) {
+  const c = s.context;
+  if (!c || !c.max) return '';
+  const pct = Math.max(0, Math.min(100, c.pct));
+  const R = 7;
+  const C = 2 * Math.PI * R;
+  const on = (C * pct) / 100;
+  const level = pct >= 75 ? 'hot' : pct >= 50 ? 'warm' : 'ok';
+  const k = (n) => Math.round(n / 1000) + 'k';
+  const tip =
+    `컨텍스트 ${k(c.total)} / ${k(c.max)} (${pct}%)` +
+    (c.compactAt ? ` · 자동압축 ${k(c.compactAt)}` : '');
+  return `<span class="ctx ${level}" title="${esc(tip)}"><svg viewBox="0 0 18 18" width="18" height="18" aria-hidden="true"><circle class="ctx-track" cx="9" cy="9" r="${R}"></circle><circle class="ctx-arc" cx="9" cy="9" r="${R}" stroke-dasharray="${on.toFixed(2)} ${(C - on).toFixed(2)}"></circle></svg><b>${k(c.total)}</b></span>`;
+}
+
 // 중요도(스티커) 우선순위: 내 조치가 필요한 세션일수록 위로 올라온다.
 const STATUS_RANK = {
   awaiting_permission: 0, // 승인대기 — 나를 기다림
@@ -350,6 +368,7 @@ function renderList() {
     el.innerHTML = `
       <div class="row">
         <span class="title">${esc(s.title)}</span>
+        ${contextRing(s)}
         ${statusBadge(s)}
       </div>
       <div class="cwd">${esc(s.cwd)}</div>${perm}`;
@@ -515,6 +534,7 @@ function updateDetailDynamic(s) {
   // 머리말(제목·상태 배지·🔔 알림 버튼)
   $('detail-head').innerHTML = `
     <span class="title">${esc(s.title)}</span>
+    ${contextRing(s)}
     ${statusBadge(s)}
     <button class="ghost nav" id="d-notice" title="알림 세션으로 이동(먼저 등록된 순)">🔔<span class="notice-count" id="d-notice-count">0</span></button>`;
   const noticeBtn = $('d-notice');

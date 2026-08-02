@@ -76,6 +76,23 @@ export interface SessionView {
   error: string | null;
   /** SDK 가 응답 중이어야 하는데 오래 조용함 → '정체?' 표시 (중단이 아니라 신호) */
   stalled: boolean;
+  /** 컨텍스트 사용량. SDK 가 기동한 뒤에만 값이 있다(그 전엔 null). */
+  context: ContextUsage | null;
+}
+
+/**
+ * 컨텍스트 사용량 — SDK 의 getContextUsage() 에서 뽑아 폰에 표시한다.
+ * 폰에서 잔여를 볼 수 없어 컨텍스트가 조용히 불어나는 게 느림의 원인이었다.
+ */
+export interface ContextUsage {
+  /** 현재 컨텍스트 토큰 수 */
+  total: number;
+  /** 모델 한도 */
+  max: number;
+  /** 사용률(%) */
+  pct: number;
+  /** SDK 가 실제로 쓰는 자동 압축 임계값. 우리가 건 값과 다를 수 있다. */
+  compactAt: number | null;
 }
 
 /** 보조 서버(정적/업로드) 상태 — 한 개 */
