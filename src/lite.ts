@@ -240,6 +240,8 @@ h2{font-size:29px;margin:14px 0 6px;}
 .cmd{font-family:monospace;font-size:24px;border:1px dashed #000;padding:6px;margin:6px 0;word-break:break-all;white-space:pre-wrap;}
 .msg{border-bottom:1px solid #ccc;padding:6px 0;white-space:pre-wrap;word-break:break-word;}
 .who{font-size:20px;color:#555;}
+.ctx{font-size:22px;color:#333;margin:4px 0;}
+.ctx-hot{font-weight:bold;color:#000;}
 input[type=text],textarea{width:100%;font-size:27px;padding:8px;border:2px solid #000;box-sizing:border-box;}
 textarea{height:80px;}
 form{margin:0;}
@@ -312,6 +314,7 @@ ${approveForm(s.id, s.pending.requestId, token, 'dashboard')}`;
   return `<div class="row">
   <b><a href="${liteUrl('/lite/session', { token, id: s.id })}">${esc(s.title)}</a></b> ${tag}
   <div class="muted">${esc(s.cwd)}</div>
+  ${contextLine(s)}
   ${perm}
 </div>`;
 }
@@ -348,6 +351,7 @@ function detailPage(s: SessionView, token: string, nextId: string | null | undef
   </p>
 </div>
 <div class="muted">${esc(s.cwd)}</div>
+${contextLine(s)}
 <h2>대화</h2>
 ${log}
 <div class="dock">
@@ -557,6 +561,21 @@ function liteUrl(path: string, params: Record<string, string>): string {
     .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
     .join('&');
   return `${path}?${q}`;
+}
+
+// 컨텍스트(토큰) 사용량 한 줄. SPA 의 원형 게이지와 같은 데이터(SDK getContextUsage)지만
+// lite 는 JS/그래픽이 없으므로 순수 텍스트로만 보여준다. 폰에서 컨텍스트가 조용히
+// 불어나는 게 느림의 원인이었으므로, 잔여를 눈에 보이게 하는 것이 목적이다.
+function contextLine(s: SessionView): string {
+  const c = s.context;
+  if (!c || !c.max) return '';
+  const pct = Math.max(0, Math.min(100, c.pct));
+  const k = (n: number) => Math.round(n / 1000) + 'k';
+  const hot = pct >= 75; // 자동압축 근처 — 굵게 강조
+  const text =
+    `컨텍스트 ${k(c.total)} / ${k(c.max)} (${pct}%)` +
+    (c.compactAt ? ` · 자동압축 ${k(c.compactAt)}` : '');
+  return `<div class="ctx${hot ? ' ctx-hot' : ''}">${hot ? '⚠ ' : ''}${esc(text)}</div>`;
 }
 
 function whoLabel(kind: string): string {

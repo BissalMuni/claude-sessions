@@ -856,6 +856,10 @@ function isRetryableStreamError(message: string): boolean {
     'during compaction',
     'fetch failed',
     'network',
+    // 긴 컨텍스트(예: 160k)에서 생성이 느려 스트림이 idle 로 끊길 때.
+    // "Stream idle timeout - partial response received" 처럼 일부만 받고 끊긴 경우 포함.
+    'idle timeout',
+    'partial response',
     'overloaded',
     '502',
     '503',
