@@ -35,7 +35,6 @@ On boot the server prints the LAN URLs (`http://<PC-IP>:8787`) and the token. Op
 - **Multi-account folder sandbox** — the rules that map a login password → an accessible root folder. **Secret values live in `.env` (gitignored), not in source.** `src/accounts.ts` holds only the *parsing logic*: it calls `process.loadEnvFile()` (Node built-in, no dotenv dep) and reads `SCREEN_ACCOUNT_1`, `SCREEN_ACCOUNT_2`, … each formatted `password|root|label` (read 1..N until a gap; empty `root` = full access) into `ACCOUNT_RULES`. `.env.example` documents the format (un-ignored via `!.env.example`). `SCREEN_ACCESS` env (JSON array `[{password,root,label}]`) is a **fallback when no `SCREEN_ACCOUNT_*` is set**; a single `SCREEN_TOKEN` is the last fallback. Resolution order lives in `auth.ts:loadAccounts` → `ACCOUNTS`; `requireToken` resolves the request token to an `Account` and attaches `req.account`. Enforcement has **two layers**:
   - **API gate (`api.ts` + `browse.ts`):** the folder picker (`/api/browse`, `/api/start-dir`) and new-session creation (`POST /api/sessions`) are clamped to `root`'s subtree (outside → 403). `isWithinRoot` is the containment check.
   - **Tool-path guard (`toolGuard.ts` in `session.ts`'s `canUseTool`):** once a session runs, every tool call is checked — Read/Write/Edit/Glob/Grep/LS path args are denied if outside the session's `root`, and Bash commands are scanned best-effort for absolute paths outside `root`. This runs **before** the danger-mode auto-allow, so it holds even in danger mode. The session's `root` is carried on `Session`, persisted in `sessionStore` (survives restart), and a `## 폴더 샌드박스` note is appended to restricted sessions' system prompt (defense-in-depth for Bash's relative-path gap). **Known limit:** Bash confinement is heuristic (absolute-path scan only) — `../` relative escapes and env-var tricks aren't fully caught; true confinement would need OS-level isolation.
-  - **lite is SPA-only:** the lite UI (`lite.ts`) doesn't enforce per-folder roots, so **restricted accounts (non-null `root`) are blocked from `/lite` entirely** — only full-access accounts may use lite.
   - Existing sessions are *not* isolated per account (a sandbox on folder access, not a multi-tenant session split).
 - `PORT` (default `8787`), `HOST` (default `0.0.0.0`, exposes on LAN)
 - `STALL_HINT_MS` (default `90000`) — silence threshold before a session shows a "stalled?" hint (display only; never kills the session)
@@ -47,7 +46,7 @@ On boot the server prints the LAN URLs (`http://<PC-IP>:8787`) and the token. Op
 
 Request/event flow: **phone → REST/WS (`api.ts`/`ws.ts`) → `SessionManager` → `Session` (SDK `query()` loop) → `canUseTool` → back out to phone for approval.**
 
-- **`server.ts`** — entry point. Boots Express + HTTP + WebSocket, mounts three things on one port: `/lite` (server-rendered UI), `/` (static SPA in `web/`), `/api` (REST). Prints LAN IPs.
+- **`server.ts`** — entry point. Boots Express + HTTP + WebSocket, mounts two things on one port: `/` (static SPA in `web/`), `/api` (REST). Prints LAN IPs.
 - **`sessionManager.ts`** — owns the session pool (`Map<id, Session>`), fans `SessionView` changes out to WebSocket subscribers via `subscribe`/`broadcast`, and runs a 10s **stall sweeper** that re-evaluates each session's stalled flag (needed because a silent SDK sends no messages to trigger an update).
 - **`session.ts`** — the core. One `Session` = one SDK `query()` call kept alive in **streaming-input mode**. Key behaviors:
   - The `prompt` is an `AsyncQueue` (see `asyncQueue.ts`); pushing a user message into the queue feeds the next turn without restarting the session.
@@ -61,7 +60,6 @@ Request/event flow: **phone → REST/WS (`api.ts`/`ws.ts`) → `SessionManager` 
 - **`auth.ts`** — single shared `TOKEN`; accepted via `Authorization: Bearer` header or `?token=` query.
 - **`types.ts`** — shared domain types (`SessionStatus`, `SessionView`, `StreamItem`, `ServerEvent`, etc.). The server↔client contract lives here.
 - **`web/`** — modern SPA (dependency-free vanilla HTML/JS/CSS).
-- **`lite.ts`** — alternate UI for old e-ink browsers: **strictly no JavaScript and no flexbox/grid** — pure HTML forms + `<meta refresh>` polling, token threaded through every link's querystring and every form's hidden input. Keep these constraints if you touch it.
 
 ### Critical design constraints
 

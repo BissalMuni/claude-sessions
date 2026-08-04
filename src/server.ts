@@ -5,7 +5,6 @@ import { networkInterfaces } from 'node:os';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import express from 'express';
 import { createApiRouter } from './api.js';
-import { createLiteRouter } from './lite.js';
 import { attachWebSocket } from './ws.js';
 import { SessionManager } from './sessionManager.js';
 import { isDanger } from './dangerMode.js';
@@ -63,10 +62,6 @@ const manager = new SessionManager();
 const restoredCount = manager.restore();
 const app = express();
 app.use(express.json({ limit: '50mb' })); // base64 이미지/파일 첨부 수용
-app.use(express.urlencoded({ extended: false, limit: '1mb' })); // lite UI 폼 파싱
-
-// 구닥다리 e-ink 브라우저용 lite UI (JS 없는 서버 렌더링)
-app.use('/lite', createLiteRouter(manager));
 
 // 최신 기기용 SPA (정적). 토큰은 UI 안에서 입력받아 API/WS 호출에 붙인다.
 // html/js/css 는 항상 재검증(no-cache): 폰·e-ink 브라우저가 옛 app.js 를 캐시해

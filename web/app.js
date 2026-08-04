@@ -80,7 +80,7 @@ function enterApp() {
 }
 
 // WebSocket 푸시가 유실돼도(반쯤 끊긴 소켓 등) 화면이 멈추지 않도록,
-// 주기적으로 전체 상태를 가져와 병합한다. lite 의 meta-refresh 와 같은 안전망.
+// 주기적으로 전체 상태를 가져와 병합한다(폴링 안전망).
 function startPolling() {
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = setInterval(pollSessions, 7000);
@@ -355,7 +355,7 @@ function renderList() {
     const el = document.createElement('div');
     el.className = 'item' + (s.id === state.selected ? ' active' : '');
     el.onclick = () => selectSession(s.id);
-    // 승인 대기면 목록에서 바로 허가/거부 (lite 대시보드와 동일하게)
+    // 승인 대기면 목록에서 바로 허가/거부
     const perm = s.pending
       ? `<div class="list-perm">
         <div class="cmd">${esc(s.pending.summary)}</div>

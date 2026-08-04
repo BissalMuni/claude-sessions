@@ -1,6 +1,6 @@
 // 폴더 사용 빈도(자주 여는 프로젝트)를 서버에 영속 저장한다.
 // 이전에는 브라우저 localStorage 에 기기별로 쌓였지만, 이제 서버의
-// JSON 파일에 모아 모든 기기(SPA·lite)가 같은 빈도를 공유한다.
+// JSON 파일에 모아 모든 기기가 같은 빈도를 공유한다.
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
