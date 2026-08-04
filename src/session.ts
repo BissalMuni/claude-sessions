@@ -200,6 +200,11 @@ export class Session {
   private toolCount = 0;
   // 폰에 보여줄 컨텍스트 사용량. SDK 기동 전에는 알 수 없어 null.
   private contextUsage: ContextUsage | null = null;
+  // 링에 표시할 '실제' 컨텍스트 크기 = 직전 턴에 모델로 보낸 프롬프트 토큰
+  // (input+cache_read+cache_write). getContextUsage().totalTokens 는 압축본/다른 기준이라
+  // 실제 전송 크기(예: 909k)를 30k 로 축소해 보여줬다 → 그 숫자에 속아 '긴 대화 제외'가
+  // 무력화됐다. 이 값을 total 로 써서 링이 진짜 비용을 반영하게 한다.
+  private lastCtxTokens: number | null = null;
   // SDK 의 duration_api_ms 는 '이번 턴'이 아니라 세션 시작부터의 누적값이다.
   // 턴별 모델 시간을 얻으려면 직전 값과의 차이를 써야 한다.
   private lastDurApiMs = -1; // -1 = 아직 기준값 없음(세션 첫 result)
@@ -614,10 +619,15 @@ export class Session {
       const u = await this.run?.getContextUsage();
       if (!u) return;
       // 폰 표시용으로 보관 → view() 에 실려 WS 로 나간다.
+      // total 은 직전 턴 실측(lastCtxTokens)을 우선한다 — getContextUsage().totalTokens 는
+      // 실제 전송 크기를 축소해 보고하는 경우가 있어(30k vs 909k) 링이 거짓말을 했다.
+      // max/compactAt/사용률은 SDK 가 보고하는 최신값으로 갱신한다.
+      const max = u.maxTokens ?? this.contextUsage?.max ?? 0;
+      const total = this.lastCtxTokens ?? u.totalTokens ?? 0;
       this.contextUsage = {
-        total: u.totalTokens ?? 0,
-        max: u.maxTokens ?? 0,
-        pct: Math.round(u.percentage ?? 0),
+        total,
+        max,
+        pct: max ? Math.round((total / max) * 100) : Math.round(u.percentage ?? 0),
         compactAt: u.autoCompactThreshold ?? null,
       };
       this.scheduleEmit();
@@ -773,6 +783,20 @@ export class Session {
       const cacheWrite = Number(u.cache_creation_input_tokens) || 0;
       const output = Number(u.output_tokens) || 0;
       const ctx = input + cacheRead + cacheWrite; // 이번 턴이 실제로 읽은 컨텍스트 크기
+      // 링/대화별 토큰 표시를 실제 전송 크기로 갱신한다. max/compactAt 은 getContextUsage
+      // 에서 온 이전 값을 유지(없으면 1M 기본). 이후 logContextUsage('turn') 가 max/임계값을
+      // 최신화하되 total 은 이 실측값을 계속 쓴다.
+      if (ctx > 0) {
+        this.lastCtxTokens = ctx;
+        const max = this.contextUsage?.max || 1_000_000;
+        this.contextUsage = {
+          total: ctx,
+          max,
+          pct: max ? Math.round((ctx / max) * 100) : 0,
+          compactAt: this.contextUsage?.compactAt ?? null,
+        };
+        this.scheduleEmit();
+      }
       const s = (n: number) => (n / 1000).toFixed(1) + 's';
       const k = (n: number) => Math.round(n / 1000) + 'k';
       const cacheHitPct = ctx ? Math.round((cacheRead / ctx) * 100) : 0;

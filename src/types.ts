@@ -81,11 +81,13 @@ export interface SessionView {
 }
 
 /**
- * 컨텍스트 사용량 — SDK 의 getContextUsage() 에서 뽑아 폰에 표시한다.
- * 폰에서 잔여를 볼 수 없어 컨텍스트가 조용히 불어나는 게 느림의 원인이었다.
+ * 컨텍스트 사용량 — 폰에 표시한다. total 은 직전 턴에 모델로 실제 전송된 프롬프트
+ * 토큰(input+cache_read+cache_write) 을 쓴다. getContextUsage().totalTokens 는 실제
+ * 전송 크기를 축소 보고하는 경우가 있어(예: 909k 를 30k 로) 그 숫자에 속아 '긴 대화
+ * 제외'가 무력화됐다. max/compactAt 은 SDK getContextUsage() 에서 온다.
  */
 export interface ContextUsage {
-  /** 현재 컨텍스트 토큰 수 */
+  /** 직전 턴에 모델로 실제 전송된 컨텍스트 토큰 수(input+cache_read+cache_write) */
   total: number;
   /** 모델 한도 */
   max: number;
