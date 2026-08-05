@@ -200,11 +200,15 @@ export class Session {
   private toolCount = 0;
   // 폰에 보여줄 컨텍스트 사용량. SDK 기동 전에는 알 수 없어 null.
   private contextUsage: ContextUsage | null = null;
-  // 링에 표시할 '실제' 컨텍스트 크기 = 직전 턴에 모델로 보낸 프롬프트 토큰
+  // 링에 표시할 '실제' 컨텍스트 크기 = 직전 턴 마지막 왕복에 모델로 보낸 프롬프트 토큰
   // (input+cache_read+cache_write). getContextUsage().totalTokens 는 압축본/다른 기준이라
   // 실제 전송 크기(예: 909k)를 30k 로 축소해 보여줬다 → 그 숫자에 속아 '긴 대화 제외'가
   // 무력화됐다. 이 값을 total 로 써서 링이 진짜 비용을 반영하게 한다.
   private lastCtxTokens: number | null = null;
+  // 이번 턴 '마지막 assistant 메시지'의 usage. result.usage 는 한 턴의 모든 API 왕복을
+  // 누적해(도구 N번 → 캐시 재읽기가 N배) max(1M)를 넘는 과대값이 된다. 반면 각 assistant
+  // 메시지 usage 는 그 왕복 '한 건'의 프롬프트 크기라, 마지막 것 = 현재 상주 컨텍스트다.
+  private lastTurnUsage: Record<string, number> | null = null;
   // SDK 의 duration_api_ms 는 '이번 턴'이 아니라 세션 시작부터의 누적값이다.
   // 턴별 모델 시간을 얻으려면 직전 값과의 차이를 써야 한다.
   private lastDurApiMs = -1; // -1 = 아직 기준값 없음(세션 첫 result)
@@ -482,6 +486,9 @@ export class Session {
           this.firstTokenSeen = true;
           this.ttftMs = Date.now() - this.turnStartMs;
         }
+        // 이 assistant 메시지 = API 왕복 한 건. 매번 덮어써서 턴 마지막 왕복의 usage 를 남긴다.
+        const au = (msg.message as unknown as { usage?: Record<string, number> }).usage;
+        if (au) this.lastTurnUsage = au;
         const blocks = (msg.message.content ?? []) as unknown as Array<Record<string, unknown>>;
         let sawTool = false;
         for (const block of blocks) {
@@ -578,6 +585,7 @@ export class Session {
     this.lastActivityAt = Date.now(); // SDK 응답을 기다리기 시작 → stall 시계 시작
     this.turnStartMs = this.lastActivityAt; // 지연 계측 시작
     this.firstTokenSeen = false;
+    this.lastTurnUsage = null; // 새 턴 → 이전 턴 마지막 왕복 usage 폐기
     this.toolSpanMs = 0;
     this.toolStartMs = null;
     this.toolCount = 0;
@@ -777,13 +785,20 @@ export class Session {
       this.lastDurApiMs = durApiCum;
       // turnStartMs 가 없던 턴(도구 연쇄·복원 직후 등)은 SDK 의 duration_ms 를 기준으로 삼는다.
       const base = wall > 0 ? wall : durTotal;
+      // result.usage 는 '이번 턴의 모든 API 왕복 누적'이다 → 도구를 N번 부른 턴이면
+      // 캐시 재읽기가 N배로 더해져 max(1M)를 넘는 과대값이 된다. 이건 턴 전체 비용 지표로만 쓴다.
       const u = (rm.usage ?? {}) as Record<string, number>;
-      const input = Number(u.input_tokens) || 0;
-      const cacheRead = Number(u.cache_read_input_tokens) || 0;
-      const cacheWrite = Number(u.cache_creation_input_tokens) || 0;
       const output = Number(u.output_tokens) || 0;
-      const ctx = input + cacheRead + cacheWrite; // 이번 턴이 실제로 읽은 컨텍스트 크기
-      // 링/대화별 토큰 표시를 실제 전송 크기로 갱신한다. max/compactAt 은 getContextUsage
+      const turnCtx =
+        (Number(u.input_tokens) || 0) +
+        (Number(u.cache_read_input_tokens) || 0) +
+        (Number(u.cache_creation_input_tokens) || 0); // 턴 누적(비용)
+      // 링/현재 컨텍스트는 '마지막 왕복(마지막 assistant 메시지)' usage 로 잰다 = 지금 상주 크기.
+      const lu = this.lastTurnUsage ?? u; // 마지막 왕복이 없으면(에러 등) 최후 수단으로 result 사용
+      const cacheRead = Number(lu.cache_read_input_tokens) || 0;
+      const ctx =
+        (Number(lu.input_tokens) || 0) + cacheRead + (Number(lu.cache_creation_input_tokens) || 0);
+      // 링/대화별 토큰 표시를 실제 상주 크기로 갱신한다. max/compactAt 은 getContextUsage
       // 에서 온 이전 값을 유지(없으면 1M 기본). 이후 logContextUsage('turn') 가 max/임계값을
       // 최신화하되 total 은 이 실측값을 계속 쓴다.
       if (ctx > 0) {
@@ -816,7 +831,7 @@ export class Session {
       const line =
         `⏱ ${s(base)} (첫토큰 ${ttft} · 모델 ${modelTxt} · ` +
         `도구 ${s(this.toolSpanMs)}×${this.toolCount} · 그외 ${overTxt}) · ` +
-        `컨텍스트 ${k(ctx)}(캐시 ${cacheHitPct}%) · 출력 ${k(output)}`;
+        `컨텍스트 ${k(ctx)}(캐시 ${cacheHitPct}%) · 턴누적 ${k(turnCtx)} · 출력 ${k(output)}`;
       try {
         if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
         appendFileSync(
@@ -825,7 +840,7 @@ export class Session {
             `[raw wall=${wall} base=${base} ttft=${this.firstTokenSeen ? this.ttftMs : -1} ` +
             `total=${durTotal} api=${durApi} apiCum=${durApiCum} ` +
             `tools=${this.toolSpanMs}/${this.toolCount} overhead=${overhead} ` +
-            `in=${input} cacheR=${cacheRead} cacheW=${cacheWrite} out=${output}]\n`,
+            `ctx=${ctx} cacheR=${cacheRead} turnCtx=${turnCtx} out=${output}]\n`,
         );
       } catch { /* 로깅 실패가 세션을 죽이면 안 된다 */ }
       if (PERF_SHOW) this.addItem('system', line);
