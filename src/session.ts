@@ -4,11 +4,15 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AsyncQueue } from './asyncQueue.js';
 import { isDanger } from './dangerMode.js';
+import { recordError, type ErrorRecord } from './errorStore.js';
 import { shortId } from './ids.js';
 import { registerPermission, registerQuestion, rejectSessionPermissions } from './permissions.js';
 import { offendingToolPath } from './toolGuard.js';
 import type {
   ContextUsage,
+  Diagnosis,
+  DiagnosisAction,
+  DiagnosisFinding,
   InputImage,
   PendingPermission,
   PendingQuestion,
@@ -16,6 +20,7 @@ import type {
   SessionStatus,
   SessionView,
   StreamItem,
+  TurnPerf,
 } from './types.js';
 
 const MAX_MESSAGES = 300; // 폰 메모리 보호: 최근 N개만 유지
@@ -110,6 +115,13 @@ const LOG_DIR = join(process.cwd(), 'logs');
 // 모든 세션의 SDK 스트림 오류(=폰이 보는 "CLI 응답 에러")를 한 파일에 모아 남긴다.
 // stderr(logs/<id>.log)로는 안 잡히는, for await 루프에서 던져진 예외를 여기서 포착한다.
 const ERROR_LOG = join(LOG_DIR, 'errors.log');
+// 연결/스트림 실패 전용 로그. errors.log 에는 컴팩션·컨텍스트 진단이 뒤섞여 있어
+// grep 집계가 어렵다. 여기엔 한 줄 key=value 만 쌓아 awk/grep 로 바로 상관분석한다.
+const CONN_LOG = join(LOG_DIR, 'conn.log');
+// 정상 동작 진단(컴팩션 적용됨 / 컨텍스트 사용량). 실패가 아니므로 errors.log 와 섞으면
+// 신호 대 잡음이 1000:4 가 되어 grep 집계가 불가능해진다 — 그래서 파일을 나눈다.
+// errors.log = 실패만, diag.log = 성공/관측값만.
+const DIAG_LOG = join(LOG_DIR, 'diag.log');
 // 응답 지연 진단: 턴마다 TTFT(첫 토큰까지)·총시간·컨텍스트 토큰·캐시 히트를 logs/perf.log 에
 // 남기고, SCREEN_PERF=1 이면 폰 화면에도 한 줄로 보여준다(어디서 몇 초 걸리는지 실측용).
 const PERF_LOG = join(LOG_DIR, 'perf.log');
@@ -212,6 +224,15 @@ export class Session {
   // SDK 의 duration_api_ms 는 '이번 턴'이 아니라 세션 시작부터의 누적값이다.
   // 턴별 모델 시간을 얻으려면 직전 값과의 차이를 써야 한다.
   private lastDurApiMs = -1; // -1 = 아직 기준값 없음(세션 첫 result)
+  // 진단(진단 버튼)용 최근 턴 실측 링. recordPerf 가 계산한 값을 그대로 쌓는다(최근 N개).
+  private perfRing: TurnPerf[] = [];
+  private static readonly PERF_RING_MAX = 20;
+  // 이번 세션에서 일시적 스트림 오류(ECONNRESET 등)로 resume 재시도한 누적 횟수.
+  // 사용자가 본 "API Error: ECONNRESET" 의 발생 빈도 지표라 진단에서 핵심 신호로 쓴다.
+  private streamRetryTotal = 0;
+  // 마지막으로 호출된 도구 이름. 연결이 끊길 때 '무엇이 돌고 있었는지'는 시각만으론
+  // 알 수 없어, conn.log 에 함께 남겨 "긴 Bash 중에만 끊긴다" 같은 상관을 보게 한다.
+  private lastToolName: string | null = null;
 
   constructor(opts: SessionOpts) {
     this.id = opts.id;
@@ -399,13 +420,15 @@ export class Session {
       // (에러 상태로 두면 touch→emit 이 삭제된 세션을 다시 저장/브로드캐스트한다)
       if (this.stopped) return;
       const message = err instanceof Error ? err.message : String(err);
+      const retryable = isRetryableStreamError(message);
       this.logError(err); // 원인은 재시도 성공/실패와 무관하게 항상 남긴다
+      this.logConnError('throw', message, retryable); // 상관분석용 한 줄(conn.log)
       // 일시적 네트워크/컴팩션 오류: 세션을 'error' 로 죽이지 않고 resume 으로 자동 재시도.
       // resume 은 sdkSessionId 가 있어야 컨텍스트를 이어받으므로, 없으면 재시도 의미가 없다.
       if (
         this.sdkSessionId &&
         this.consumeRetries < STREAM_MAX_RETRIES &&
-        isRetryableStreamError(message)
+        retryable
       ) {
         this.scheduleRetry(message);
         return;
@@ -425,6 +448,7 @@ export class Session {
    */
   private scheduleRetry(message: string): void {
     this.consumeRetries += 1;
+    this.streamRetryTotal += 1; // 진단용 누적(성공해도 리셋 안 함) — ECONNRESET 빈도 지표
     const delay = STREAM_RETRY_BASE_MS * 2 ** (this.consumeRetries - 1); // 2s → 4s → 8s …
     this.addItem(
       'system',
@@ -494,8 +518,13 @@ export class Session {
         for (const block of blocks) {
           if (block.type === 'text' && typeof block.text === 'string') {
             this.addItem('text', block.text);
+            // SDK 가 연결 실패를 예외 대신 이 텍스트로 흘려보내는 경로.
+            // (errors.log 에 ECONNRESET 이 한 건도 없던 이유가 이것이다.)
+            if (looksLikeConnError(block.text)) this.logConnError('text', block.text);
           } else if (block.type === 'tool_use') {
-            this.addItem('tool', summarizeToolInput(String(block.name), block.input));
+            const toolName = String(block.name);
+            this.addItem('tool', summarizeToolInput(toolName, block.input));
+            this.lastToolName = toolName; // 끊긴 순간 돌던 도구 추적용
             sawTool = true;
             this.toolCount += 1;
           }
@@ -511,6 +540,8 @@ export class Session {
         // 비정상 종료(에러/턴 한도 등)만 종료 사유로 표시한다.
         if (msg.subtype !== 'success') {
           this.addItem('result', `(${msg.subtype})`);
+          // 비정상 종료는 연결 실패의 주요 통로다 — 예외로 안 오고 여기로 온다.
+          this.logConnError('result', `result subtype=${msg.subtype}`);
         }
         this.recordPerf(msg as Record<string, unknown>); // 응답 지연 실측 기록
         this.setStatus('idle'); // 턴 완료 → 다음 입력 대기
@@ -599,6 +630,7 @@ export class Session {
       // Settings 키(autoCompactEnabled/autoCompactWindow)를 런타임 설정 레이어에 병합.
       if (!this.run) {
         this.logError(`[compaction] run 이 없어 설정을 못 걸었다 (window=${COMPACT_WINDOW})`);
+        this.recordFailure('compaction', `run 이 없어 설정을 못 걸었다 (window=${COMPACT_WINDOW})`);
         return;
       }
       await this.run.applyFlagSettings({
@@ -607,13 +639,14 @@ export class Session {
       } as Record<string, unknown>);
       // 실측 결과 컴팩션이 한 번도 안 걸린 적이 있다(마커 0건). 성공도 남겨야
       // '적용은 됐는데 안 걸리는지' vs '적용 자체가 실패하는지'를 가릴 수 있다.
-      this.logError(`[compaction] 적용됨 window=${COMPACT_WINDOW}`);
+      this.logDiag(`[compaction] 적용됨 window=${COMPACT_WINDOW}`);
       // 적용됐다고 해서 CLI 가 그 값을 임계값으로 쓴다는 보장은 없다.
       // SDK 에 직접 물어 '실제 임계값/활성화 여부'를 확인한다.
       void this.logContextUsage('apply');
     } catch (err) {
       // 삼키면 컴팩션이 안 걸려도 영영 모른다 — 세션은 살리되 기록은 남긴다.
       this.logError(`[compaction] 적용 실패: ${err instanceof Error ? err.message : String(err)}`);
+      this.recordFailure('compaction', `적용 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -640,13 +673,14 @@ export class Session {
       };
       this.scheduleEmit();
       const k = (n: number | undefined) => (n == null ? '-' : Math.round(n / 1000) + 'k');
-      this.logError(
+      this.logDiag(
         `[context/${tag}] total=${k(u.totalTokens)} max=${k(u.maxTokens)} ` +
           `rawMax=${k(u.rawMaxTokens)} pct=${Math.round(u.percentage ?? 0)}% ` +
           `autoCompactThreshold=${k(u.autoCompactThreshold)} enabled=${u.isAutoCompactEnabled}`,
       );
     } catch (err) {
       this.logError(`[context/${tag}] 조회 실패: ${err instanceof Error ? err.message : String(err)}`);
+      this.recordFailure('context', `${tag} 조회 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -749,6 +783,26 @@ export class Session {
   }
 
   /**
+   * 실패가 아닌 관측값(컴팩션 적용 성공, 컨텍스트 사용량)을 logs/diag.log 에 남긴다.
+   *
+   * 왜 errors.log 와 분리했나: 이 두 줄이 매 턴 찍히는 바람에 errors.log 1031건 중
+   * 1027건이 진단이고 진짜 실패는 4건뿐이었다. 에러 빈도를 grep 으로 세는 게 불가능했다.
+   * 실패는 errors.log, 관측은 diag.log — 파일만 봐도 성격이 갈리게 한다.
+   */
+  private logDiag(message: string): void {
+    try {
+      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+      appendFileSync(
+        DIAG_LOG,
+        `[${new Date().toISOString()}] ${this.id} "${this.title}" ${message}
+`,
+      );
+    } catch {
+      /* 로깅 실패가 세션을 죽이면 안 된다 */
+    }
+  }
+
+  /**
    * SDK 스트림 루프에서 던져진 오류를 logs/errors.log 에 영구 기록한다.
    * 폰이 보는 "CLI 응답 에러"의 실제 원인(과부하/네트워크/서브프로세스 크래시)을
    * 사후에 확인하기 위한 관찰용. 세션별 로그(logs/<id>.log)에도 함께 남긴다.
@@ -765,6 +819,68 @@ export class Session {
     } catch {
       /* 로깅 실패가 세션을 죽이면 안 된다 */
     }
+  }
+
+  /**
+   * 연결/스트림 계열 실패를 한 줄 key=value 로 logs/conn.log 에 남긴다.
+   *
+   * 왜 따로 만들었나: "API Error: Unable to connect to API (ECONNRESET)" 는 SDK 가 예외로
+   * 던지지 않고 result subtype / assistant 텍스트로 흘려보낼 때가 있다. 그래서 logError 를
+   * 타지 못해 errors.log 에 단 한 건도 안 남았고(실측 확인), 발생 시각·빈도·그때 돌던 도구를
+   * 상관분석할 수 없었다. 여기서 그 맥락을 통째로 붙여 기록한다.
+   *
+   * src = 감지 경로. throw(이터레이터 예외) / result(비정상 종료) / text(CLI 가 뱉은 문구).
+   * 셋은 서로 다른 실패를 잡으므로 집계할 때 구분해서 봐야 한다.
+   */
+  private logConnError(src: 'throw' | 'result' | 'text', message: string, retryable?: boolean): void {
+    try {
+      if (!existsSync(LOG_DIR)) mkdirSync(LOG_DIR, { recursive: true });
+      // 턴 시작 후 경과. 첫 토큰도 못 본 채 오래 매달렸는지가 idle-reset 판별의 핵심 신호다.
+      const elapsed = this.turnStartMs != null ? Date.now() - this.turnStartMs : -1;
+      // 아직 안 닫힌 도구 구간 = 끊긴 순간 도구가 돌고 있었다는 뜻. 0 보다 크면 그 자체가 단서.
+      const toolOpen = this.toolStartMs != null ? Date.now() - this.toolStartMs : 0;
+      const flat = message.replace(/\s+/g, ' ').trim().slice(0, 300);
+      appendFileSync(
+        CONN_LOG,
+        `[${new Date().toISOString()}] ${this.id} src=${src} ` +
+          `elapsed=${elapsed} ttft=${this.firstTokenSeen ? this.ttftMs : -1} ` +
+          `toolMs=${this.toolSpanMs + toolOpen} toolN=${this.toolCount} ` +
+          `toolOpen=${toolOpen} lastTool=${this.lastToolName ?? '-'} ` +
+          `ctx=${this.lastCtxTokens ?? -1} retry=${this.consumeRetries}/${this.streamRetryTotal} ` +
+          `title="${this.title}" msg="${flat}"\n`,
+      );
+    } catch {
+      /* 로깅 실패가 세션을 죽이면 안 된다 */
+    }
+    // 재시작을 넘어 남는 영속 기록. conn.log 는 사람이 읽는 용, 이쪽은 집계용.
+    this.recordFailure(src, message, {
+      retryable,
+      lastTool: this.lastToolName ?? null,
+      ctxTokens: this.lastCtxTokens ?? -1,
+      elapsedMs: this.turnStartMs != null ? Date.now() - this.turnStartMs : -1,
+    });
+  }
+
+  /**
+   * 실패 1건을 .data/errors.jsonl 에 영속 기록한다.
+   * conn.log/errors.log 는 사람이 읽는 용이고, 이쪽은 재시작을 넘어 누적되는 집계용이다.
+   */
+  private recordFailure(
+    src: ErrorRecord['src'],
+    message: string,
+    extra: Partial<ErrorRecord> = {},
+  ): void {
+    recordError({
+      at: new Date().toISOString(),
+      sessionId: this.id,
+      title: this.title,
+      cwd: this.cwd,
+      src,
+      message: message.replace(/\s+/g, ' ').trim().slice(0, 500),
+      retry: this.consumeRetries,
+      retryTotal: this.streamRetryTotal,
+      ...extra,
+    });
   }
 
   /**
@@ -844,6 +960,20 @@ export class Session {
         );
       } catch { /* 로깅 실패가 세션을 죽이면 안 된다 */ }
       if (PERF_SHOW) this.addItem('system', line);
+      // 진단 버튼이 읽을 수 있게 이번 턴 실측치를 인메모리 링에도 남긴다(로그 파일과 별개).
+      this.perfRing.push({
+        at: new Date().toISOString(),
+        wallMs: base,
+        apiMs: apiKnown ? durApi : -1,
+        toolMs: this.toolSpanMs,
+        toolCount: this.toolCount,
+        ttftMs: this.firstTokenSeen ? this.ttftMs : -1,
+        ctx,
+        turnCtx,
+        cacheHitPct,
+        output,
+      });
+      if (this.perfRing.length > Session.PERF_RING_MAX) this.perfRing.shift();
       // 턴마다 실제 컨텍스트가 임계값을 넘고도 압축이 안 걸리는지 추적한다.
       void this.logContextUsage('turn');
     } catch { /* 계측 실패가 세션을 죽이면 안 된다 */ }
@@ -857,6 +987,120 @@ export class Session {
     } catch {
       /* 로깅 실패가 세션을 죽이면 안 된다 */
     }
+  }
+
+  /**
+   * 응답 지연 원인 진단(폰 진단 버튼). 인메모리 perf 링 + 현재 컨텍스트 + 스트림 오류 누적을
+   * 임계값과 대조해 '무거움/보통/양호' 판정과 근거, 그리고 수동 실행용 권장 액션을 만든다.
+   * 임계값 근거는 실측(메모리): 상주 컨텍스트가 커질수록 모델 시간이 선형 증가(267k→74s, 665k→111s),
+   * 자동압축은 실제 967k 임계라 그 아래선 안 걸림, 거대 턴누적/ECONNRESET 재시도가 악순환.
+   */
+  diagnose(): Diagnosis {
+    const findings: DiagnosisFinding[] = [];
+    const worst = (a: DiagnosisFinding['level'], b: DiagnosisFinding['level']) => {
+      const rank = { ok: 0, warn: 1, crit: 2 };
+      return rank[a] >= rank[b] ? a : b;
+    };
+    const k = (n: number) => Math.round(n / 1000) + 'k';
+    const s = (n: number) => (n / 1000).toFixed(0) + 's';
+
+    // 최근 턴 표본(최대 8개)에서 모델 시간이 알려진 것만 모은다.
+    const recent = this.perfRing.slice(-8);
+    const apis = recent.map((p) => p.apiMs).filter((v) => v >= 0).sort((a, b) => a - b);
+    const median = apis.length ? apis[Math.floor((apis.length - 1) / 2)] : -1;
+    const maxApi = apis.length ? apis[apis.length - 1] : -1;
+    const last = recent.length ? recent[recent.length - 1] : null;
+    const ctx = this.contextUsage?.total ?? last?.ctx ?? 0;
+    const max = this.contextUsage?.max ?? 1_000_000;
+    const compactAt = this.contextUsage?.compactAt ?? null;
+    const cacheHitPct = last?.cacheHitPct ?? 0;
+    const maxTurnCtx = recent.reduce((m, p) => Math.max(m, p.turnCtx), 0);
+
+    // 1) 상주 컨텍스트 크기 — 모델 시간의 1차 결정 요인.
+    if (ctx >= 500_000) {
+      findings.push({ level: 'crit', text: `상주 컨텍스트 ${k(ctx)} — 매우 큼. 컨텍스트가 커질수록 모델이 턴마다 이걸 다시 참조해 느려진다(실측: 665k에서 ~111s/턴).` });
+    } else if (ctx >= 200_000) {
+      findings.push({ level: 'warn', text: `상주 컨텍스트 ${k(ctx)} — 다소 큼. 응답이 점점 느려지는 구간이다.` });
+    } else if (ctx > 0) {
+      findings.push({ level: 'ok', text: `상주 컨텍스트 ${k(ctx)} — 양호.` });
+    }
+
+    // 2) 자동압축 임계 미달로 압축이 안 걸리는 구간(근본원인). 실제 임계가 상주보다 훨씬 높으면 경고.
+    if (compactAt && ctx > 0 && compactAt > ctx * 1.2 && ctx >= 200_000) {
+      findings.push({ level: 'warn', text: `자동압축 임계 ${k(compactAt)} 이 상주 ${k(ctx)} 보다 훨씬 높다 → 자동 압축이 안 걸려 매 턴 전체를 다시 읽는다. 수동 압축 또는 재시작이 필요.` });
+    }
+
+    // 3) 모델 시간(턴당). 최근 턴이 길면 직접적 체감 지연.
+    if (maxApi >= 120_000) {
+      findings.push({ level: 'crit', text: `최근 모델 시간 최대 ${s(maxApi)}/턴 (중앙값 ${median >= 0 ? s(median) : '-'}) — 한 턴이 지나치게 길다. 이 길이면 연결이 못 버텨 ECONNRESET 로 끊길 수 있다.` });
+    } else if (maxApi >= 45_000) {
+      findings.push({ level: 'warn', text: `최근 모델 시간 최대 ${s(maxApi)}/턴 (중앙값 ${median >= 0 ? s(median) : '-'}) — 느려지는 중.` });
+    }
+
+    // 4) 거대 턴 누적 — 도구 연쇄로 한 턴에 컨텍스트가 폭증하면 비용·시간이 급증.
+    if (maxTurnCtx >= 2_000_000) {
+      findings.push({ level: 'crit', text: `한 턴 누적 왕복이 ${k(maxTurnCtx)} 까지 치솟았다 — 도구를 많이 부른 턴이 컨텍스트를 몇 배로 재읽는다. 새 세션으로 재시작 권장.` });
+    } else if (maxTurnCtx >= 800_000) {
+      findings.push({ level: 'warn', text: `한 턴 누적 왕복 최대 ${k(maxTurnCtx)} — 도구 연쇄로 왕복 비용이 큼.` });
+    }
+
+    // 5) 캐시 미스 — 대개 96~99% 히트라 낮으면 이상신호.
+    if (ctx >= 100_000 && cacheHitPct > 0 && cacheHitPct < 90) {
+      findings.push({ level: 'warn', text: `캐시 히트율 ${cacheHitPct}% — 매 턴 큰 컨텍스트를 새로 읽고 있다(보통 96%+).` });
+    }
+
+    // 6) ECONNRESET 등 스트림 오류 재시도 — 사용자가 본 그 에러의 누적 빈도.
+    if (this.streamRetryTotal >= 3) {
+      findings.push({ level: 'crit', text: `연결 오류(ECONNRESET 등) 재시도 ${this.streamRetryTotal}회 — 거대 컨텍스트/장시간 턴이 연결을 끊는 악순환이 반복되고 있다.` });
+    } else if (this.streamRetryTotal >= 1) {
+      findings.push({ level: 'warn', text: `연결 오류 재시도 ${this.streamRetryTotal}회 발생 — 반복되면 컨텍스트 축소가 필요.` });
+    }
+
+    // 표본이 없을 때(서버 재시작 후 첫 턴 전) — 컨텍스트만으로 판단했음을 알린다.
+    if (recent.length === 0) {
+      findings.push({ level: 'ok', text: '이 세션에서 서버 재시작 후 완료된 턴이 아직 없어 실측 지연 표본이 없다 — 컨텍스트 크기만으로 판단했다. 한 턴 돌리면 정밀해진다.' });
+    }
+
+    const severity = findings.reduce<DiagnosisFinding['level']>((acc, f) => worst(acc, f.level), 'ok');
+
+    // 권장 액션(수동 실행). 무거우면 재시작을 우선(컨텍스트 완전 초기화), 보통이면 압축을 우선.
+    const actions: DiagnosisAction[] = [];
+    if (severity !== 'ok') {
+      const heavy = severity === 'crit';
+      const compact: DiagnosisAction = { kind: 'compact', label: '지금 압축 (/compact)', note: '이전 대화를 요약해 상주 컨텍스트를 줄인다(가벼운 조치).' };
+      const restart: DiagnosisAction = { kind: 'restart', label: '새 세션으로 재시작', note: '같은 폴더로 새 세션을 열어 컨텍스트를 완전히 비운다(대화 기록 초기화).' };
+      if (heavy) actions.push(restart, compact);
+      else actions.push(compact, restart);
+    }
+    // 지금 응답을 오래 기다리는 중이면 중단도 제시.
+    if (this.status === 'thinking' && this.isStalled()) {
+      actions.push({ kind: 'interrupt', label: '진행 중 턴 중단', note: '지금 멈춰 세운 뒤 다시 지시할 수 있다.' });
+    }
+
+    const headline =
+      severity === 'crit'
+        ? `무거움 — 컨텍스트 ${k(ctx)}${maxApi >= 0 ? `, 모델 ${s(maxApi)}/턴` : ''}. 재시작 또는 압축을 권장.`
+        : severity === 'warn'
+          ? `보통 — 컨텍스트 ${k(ctx)}${maxApi >= 0 ? `, 모델 ${s(maxApi)}/턴` : ''}. 슬슬 압축을 고려.`
+          : `양호 — 컨텍스트 ${k(ctx)}. 특별한 조치 불필요.`;
+
+    return {
+      severity,
+      headline,
+      findings,
+      actions,
+      metrics: {
+        ctx,
+        max,
+        compactAt,
+        lastApiMs: last?.apiMs ?? -1,
+        medianApiMs: median,
+        maxApiMs: maxApi,
+        cacheHitPct,
+        retryCount: this.streamRetryTotal,
+        turns: recent.length,
+      },
+    };
   }
 
   /** 직렬화 가능한 스냅샷 */
@@ -905,6 +1149,21 @@ function isRetryableStreamError(message: string): boolean {
     '504',
     '529',
   ].some((needle) => m.includes(needle));
+}
+
+/**
+ * SDK/CLI 가 예외 대신 assistant 텍스트로 흘려보내는 연결 실패 문구인지 판별한다.
+ * (예: "API Error: Unable to connect to API (ECONNRESET)")
+ *
+ * 좁게 잡는 이유: 모델이 코드 리뷰 중 본문에서 'ECONNRESET' 를 언급하는 것까지 잡으면
+ * conn.log 가 오탐으로 오염된다. 그래서 (1) CLI 가 붙이는 머리표가 있고
+ * (2) 장문이 아닌(=정상 답변이 아닌) 짧은 덩어리일 때만 연결 실패로 본다.
+ */
+function looksLikeConnError(text: string): boolean {
+  const t = text.trim();
+  if (t.length > 300) return false; // 장문 = 모델의 정상 답변
+  const m = t.toLowerCase();
+  return m.startsWith('api error') || m.startsWith('error:') || m.includes('api error:');
 }
 
 /** AskUserQuestion 입력에서 폰이 그릴 문항 목록을 뽑아낸다 */

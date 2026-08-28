@@ -31,8 +31,10 @@
         <div class="tb-menu">
           <button id="tb-more" class="ghost tb-btn tb-more-btn" aria-haspopup="true" aria-expanded="false" title="더보기">⋮</button>
           <div id="tb-menu-pop" class="tb-menu-pop hidden">
+            <button id="tb-danger" class="tb-menu-item" title="위험 모드: 켜면 모든 도구를 묻지 않고 자동 실행(AskUserQuestion만 폰 질문)">위험 모드 <span class="tb-menu-hint" id="tb-danger-hint">ON</span></button>
             <button id="tb-reset" class="tb-menu-item tb-sess hidden" title="이 세션을 닫고 같은 폴더로 새 세션 열기(대화/컨텍스트 초기화)">리셋 <span class="tb-menu-hint">같은 폴더로 새 세션</span></button>
             <button id="aux-btn" class="tb-menu-item">서버 <span class="tb-menu-hint">보조 서버(정적/업로드)</span></button>
+            <button id="tb-diagnose" class="tb-menu-item tb-sess hidden" title="응답이 느린 원인(컨텍스트/모델시간/연결오류)을 분석하고 대응을 제안">진단 <span class="tb-menu-hint">응답 지연 원인 분석</span></button>
             <button id="tb-remove" class="tb-menu-item tb-sess hidden">종료 <span class="tb-menu-hint">이 세션 닫기</span></button>
             <button id="logout-btn" class="tb-menu-item">로그아웃 <span class="tb-menu-hint">다른 계정으로 접속</span></button>
           </div>
@@ -69,6 +71,21 @@
           <input id="title-input" type="text" placeholder="비우면 폴더명" autocomplete="off" />
         </div>
         <div id="modal-err" class="err"></div>
+      </div>
+    </div>
+
+    <!-- 응답 지연 진단 모달 -->
+    <div id="diag-modal" class="modal hidden">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h2>응답 지연 진단</h2>
+          <div class="modal-head-actions">
+            <button id="diag-refresh" class="ghost">다시 진단</button>
+            <button id="diag-close" class="ghost">닫기</button>
+          </div>
+        </div>
+        <div id="diag-body" class="diag-body"></div>
+        <div id="diag-err" class="err"></div>
       </div>
     </div>
 

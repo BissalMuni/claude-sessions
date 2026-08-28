@@ -150,6 +150,12 @@ $('tb-reset').onclick = () => {
   const s = state.selected ? state.sessions.get(state.selected) : null;
   if (s) resetSession(s);
 };
+// 위험 모드 ON/OFF 토글(전역): ⋮ 메뉴 항목. 서버에 반영 → danger 이벤트로 모든 기기 동기화.
+$('tb-danger').onclick = () => toggleDanger();
+$('tb-diagnose').onclick = () => {
+  const id = state.selected;
+  if (id) openDiagnose(id);
+};
 
 // 상단바 더보기(⋮) 메뉴: 서버/로그아웃(전역) + 리셋/종료(세션). 좁은 폰에서 버튼이 안 잘리게 묶는다.
 function closeMoreMenu() {
@@ -175,6 +181,69 @@ async function resetSession(s) {
   try {
     const d = await api('POST', '/sessions', { cwd: s.cwd, title: s.title }); // 먼저 새 세션 확보
     state.sessions.set(d.session.id, d.session);
+    await api('DELETE', `/sessions/${s.id}`).catch(() => {}); // 기존 세션 종료(실패해도 진행)
+    state.sessions.delete(s.id);
+    state.drafts.delete(s.id);
+    state.images.delete(s.id);
+    state.files.delete(s.id);
+    state.prevStatus.delete(s.id);
+    clearNotice(s.id);
+    selectSession(d.session.id); // 새 세션으로 이동
+  } catch (e) { showErr(e); }
+}
+
+// 대화를 텍스트로 직렬화. 너무 길면 '앞부분'을 잘라 최근(뒤쪽)만 남긴다 — 1 2 3 4 5 → 3 4 5.
+const MIGRATE_MAX_CHARS = 48000; // 대략 1.2~1.6만 토큰 — 새 세션에 옮길 대화 상한
+function serializeConversation(s) {
+  const parts = [];
+  for (const m of s.messages || []) {
+    const text = (m.text || '').trim();
+    if (!text) continue;
+    parts.push(`[${whoLabel(m.kind)}]\n${text}`);
+  }
+  let body = parts.join('\n\n');
+  let truncated = false;
+  if (body.length > MIGRATE_MAX_CHARS) {
+    // 뒤에서부터 MIGRATE_MAX_CHARS 만큼 남기고, 잘린 지점이 메시지 경계에 가깝게 맞춘다.
+    let cut = body.length - MIGRATE_MAX_CHARS;
+    const nextBoundary = body.indexOf('\n\n[', cut);
+    if (nextBoundary !== -1 && nextBoundary - cut < 4000) cut = nextBoundary + 2;
+    body = body.slice(cut);
+    truncated = true;
+  }
+  const header = truncated
+    ? '아래는 이전 세션 대화의 뒷부분(최근 내용만, 앞부분 생략)이다. 맥락을 파악하고 이어서 진행해줘.'
+    : '아래는 이전 세션의 대화 기록이다. 맥락을 파악하고 이어서 진행해줘.';
+  return `${header}\n\n----- 이전 대화 -----\n\n${body}`;
+}
+
+// 클립보드 복사. LAN(http)은 보안 컨텍스트가 아니라 navigator.clipboard 가 없을 수 있어 폴백을 둔다.
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* 폴백으로 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch { return false; }
+}
+
+// 복사+인계: 현재 대화를 클립보드에 복사한 뒤, 같은 폴더로 새 세션을 열어
+// 그 대화를 붙여넣고 전송한다. (API가 느려질 때 새 세션으로 갈아타는 용도)
+async function copyAndMigrate(s) {
+  const text = serializeConversation(s);
+  await copyToClipboard(text); // 실패해도 인계는 진행(클립보드는 보조 수단)
+  if (!confirm('이 대화를 복사해 같은 폴더로 새 세션을 열고 이어갈까요?\n(현재 세션은 종료되고, 복사한 대화가 새 세션으로 전송됩니다)')) return;
+  try {
+    const d = await api('POST', '/sessions', { cwd: s.cwd, title: s.title }); // 먼저 새 세션 확보
+    state.sessions.set(d.session.id, d.session);
+    await api('POST', `/sessions/${d.session.id}/prompt`, { text, images: [], files: [] }); // 대화 인계 + 전송
     await api('DELETE', `/sessions/${s.id}`).catch(() => {}); // 기존 세션 종료(실패해도 진행)
     state.sessions.delete(s.id);
     state.drafts.delete(s.id);
@@ -318,6 +387,13 @@ function render() {
   document.body.classList.toggle('viewing', hasSel);
   // 상단 세션 동작 버튼(중단/리셋/종료)은 실제 세션을 볼 때만 노출(서버 현황 페이지에선 숨김)
   document.querySelectorAll('.tb-sess').forEach((b) => b.classList.toggle('hidden', !hasSel || isServers));
+  // 위험 모드 상태를 ⋮ 메뉴 항목에 반영(다른 기기 토글로도 바뀔 수 있어 매 렌더마다).
+  const dgItem = $('tb-danger');
+  if (dgItem) {
+    dgItem.classList.toggle('danger-on', state.danger);
+    const hint = $('tb-danger-hint');
+    if (hint) hint.textContent = state.danger ? 'ON — 자동 실행 중' : 'OFF — 매번 확인';
+  }
   renderList();
   renderDetail();
 
@@ -423,11 +499,8 @@ function buildDetailShell(detail, s) {
         <button class="qa-btn" id="qa-commit" title="변경사항 커밋 후 푸시">커푸</button>
         <button class="qa-btn qa-nav" id="qa-prev" title="이전 프로젝트">◀</button>
         <button class="qa-btn qa-nav" id="qa-next" title="다음 프로젝트">▶</button>
-        <button class="qa-btn qa-refresh" id="qa-refresh" title="새로고침(다시 연결/동기화)">⟳</button>
+        <button class="qa-btn qa-copy" id="qa-copy" title="이 대화를 복사해 같은 폴더로 새 세션을 열고 이어가기(API가 느려질 때 갈아타기)">📋</button>
         <button class="qa-btn qa-compact" id="qa-compact" title="컨텍스트 압축(/compact) — 이전 대화를 요약해 토큰 재독 비용을 줄임">CPT</button>
-        <button class="qa-btn qa-danger ${state.danger ? 'on' : 'off'}" id="qa-danger"
-          title="위험 모드: 켜면 모든 도구를 묻지 않고 자동 실행(AskUserQuestion만 폰 질문)">
-          ${state.danger ? '위험<br>ON' : '안전<br>OFF'}</button>
       </div>
       <div class="thumbs" id="thumbs"></div>
       <div class="files" id="files"></div>
@@ -518,15 +591,13 @@ function buildDetailShell(detail, s) {
     '변경사항을 커밋하고 푸시해줘. 커밋 메시지는 변경 내용을 요약해서 작성해줘.');
   $('qa-prev').onclick = () => navProject(-1);
   $('qa-next').onclick = () => navProject(1);
-  // 새로고침: 페이지를 다시 불러와 WS 재연결 + 최신 스냅샷 수신
-  $('qa-refresh').onclick = () => location.reload();
+  // 복사/인계: 이 대화를 클립보드에 복사하고, 같은 폴더로 새 세션을 열어 이어간다
+  $('qa-copy').onclick = () => copyAndMigrate(s);
   // CPT: 이 세션 컨텍스트를 지금 압축(/compact)
   $('qa-compact').onclick = () => {
     if (!confirm('이 세션의 이전 대화를 지금 압축할까요?\n(요약본으로 줄여 토큰 재독 비용을 낮춥니다)')) return;
     api('POST', `/sessions/${s.id}/compact`).catch(showErr);
   };
-  // 위험 모드 ON/OFF 토글: 서버에 반영 → danger 이벤트로 모든 기기 동기화
-  $('qa-danger').onclick = () => toggleDanger();
 }
 
 // 동적 영역: 머리말/승인·질문/로그/위험버튼 상태 — 입력창은 건드리지 않는다.
@@ -574,12 +645,6 @@ function updateDetailDynamic(s) {
     log.appendChild(el);
   }
 
-  // 위험 버튼 상태(다른 기기 토글로도 바뀔 수 있어 매 렌더마다 반영)
-  const dgr = $('qa-danger');
-  if (dgr) {
-    dgr.className = `qa-btn qa-danger ${state.danger ? 'on' : 'off'}`;
-    dgr.innerHTML = state.danger ? '위험<br>ON' : '안전<br>OFF';
-  }
 }
 
 // 빠른 실행: 입력창을 거치지 않고 즉시 프롬프트를 전송한다 (폰에서 한 번 탭).
@@ -1056,6 +1121,78 @@ $('aux-static-start').onclick = () => auxAction('static', 'start');
 $('aux-static-stop').onclick = () => auxAction('static', 'stop');
 $('aux-upload-start').onclick = () => auxAction('upload', 'start');
 $('aux-upload-stop').onclick = () => auxAction('upload', 'stop');
+
+// ---------- 응답 지연 진단 ----------
+// 진단 버튼 → 서버가 컨텍스트/모델시간/연결오류를 분석해 판정+권장 대응을 준다.
+// 대응(압축/재시작/중단)은 여기 버튼으로 사용자가 직접 눌러 실행한다(자동 실행 아님).
+let diagSessionId = null; // 지금 진단 모달이 보고 있는 세션 id
+async function openDiagnose(id) {
+  diagSessionId = id;
+  $('diag-err').textContent = '';
+  $('diag-body').innerHTML = '<div class="empty">진단 중…</div>';
+  $('diag-modal').classList.remove('hidden');
+  await runDiagnose();
+}
+async function runDiagnose() {
+  const id = diagSessionId;
+  if (!id) return;
+  $('diag-err').textContent = '';
+  try {
+    const d = await api('GET', `/sessions/${id}/diagnose`);
+    renderDiagnosis(d.diagnosis);
+  } catch (e) {
+    $('diag-body').innerHTML = '';
+    $('diag-err').textContent = e.message || String(e);
+  }
+}
+function renderDiagnosis(d) {
+  const s = state.sessions.get(diagSessionId);
+  const k = (n) => Math.round(n / 1000) + 'k';
+  const secs = (n) => (n < 0 ? '-' : (n / 1000).toFixed(0) + 's');
+  const sevLabel = { crit: '무거움', warn: '보통', ok: '양호' }[d.severity] || d.severity;
+  const m = d.metrics;
+  const findings = d.findings
+    .map((f) => `<li class="diag-f diag-${f.level}">${esc(f.text)}</li>`)
+    .join('');
+  const metricsRow =
+    `상주 ${k(m.ctx)}/${k(m.max)}` +
+    (m.compactAt ? ` · 자동압축 ${k(m.compactAt)}` : '') +
+    ` · 모델 최근 ${secs(m.lastApiMs)}/중앙 ${secs(m.medianApiMs)}/최대 ${secs(m.maxApiMs)}` +
+    ` · 캐시 ${m.cacheHitPct}%` +
+    ` · 연결오류 ${m.retryCount}회 · 표본 ${m.turns}턴`;
+  const actions = d.actions
+    .map((a) => `<button class="diag-act diag-act-${a.kind}" data-kind="${a.kind}">${esc(a.label)}${a.note ? `<span class="diag-act-note">${esc(a.note)}</span>` : ''}</button>`)
+    .join('');
+  $('diag-body').innerHTML = `
+    <div class="diag-headline diag-sev-${d.severity}"><span class="diag-badge">${esc(sevLabel)}</span>${esc(d.headline)}</div>
+    <ul class="diag-list">${findings || '<li class="diag-f diag-ok">소견 없음</li>'}</ul>
+    <div class="diag-metrics">${esc(metricsRow)}</div>
+    ${actions ? `<div class="diag-actions-label">권장 대응 (직접 실행)</div><div class="diag-actions">${actions}</div>` : '<div class="diag-metrics">권장 대응: 없음 (양호)</div>'}`;
+  // 액션 버튼 연결
+  $('diag-body').querySelectorAll('.diag-act').forEach((btn) => {
+    btn.onclick = () => runDiagAction(btn.dataset.kind, s);
+  });
+}
+async function runDiagAction(kind, s) {
+  if (!s) return;
+  try {
+    if (kind === 'compact') {
+      if (!confirm('지금 컨텍스트를 압축(/compact)할까요?')) return;
+      await api('POST', `/sessions/${s.id}/compact`);
+    } else if (kind === 'interrupt') {
+      await api('POST', `/sessions/${s.id}/interrupt`);
+    } else if (kind === 'restart') {
+      $('diag-modal').classList.add('hidden'); // resetSession 이 자체 확인창을 띄운다
+      await resetSession(s);
+      return;
+    }
+    $('diag-modal').classList.add('hidden');
+  } catch (e) {
+    $('diag-err').textContent = e.message || String(e);
+  }
+}
+$('diag-close').onclick = () => { $('diag-modal').classList.add('hidden'); diagSessionId = null; };
+$('diag-refresh').onclick = () => runDiagnose();
 
 // ---------- 서버 현황 페이지 ----------
 // 로컬에서 돌고 있는 서버(알려진 고정 서버 + 기타 LISTEN 포트)를 보여준다.

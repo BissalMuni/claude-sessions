@@ -264,6 +264,14 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ ok: true });
   });
 
+  // 응답 지연 진단 (진단 버튼) — 컨텍스트/모델시간/연결오류를 분석해 판정 + 권장 대응을 준다
+  router.get('/sessions/:id/diagnose', (req, res) => {
+    if (!manager.canAccess(req.params.id, req.account)) return res.status(404).json({ error: 'not found' });
+    const diagnosis = manager.diagnose(req.params.id);
+    if (!diagnosis) return res.status(404).json({ error: 'not found' });
+    res.json({ diagnosis });
+  });
+
   // 진행 중 턴 중단
   router.post('/sessions/:id/interrupt', async (req, res) => {
     if (!manager.canAccess(req.params.id, req.account)) return res.status(404).json({ error: 'not found' });

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { networkInterfaces } from 'node:os';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import express from 'express';
+import type { ErrorRequestHandler } from 'express';
 import { createApiRouter } from './api.js';
 import { attachWebSocket } from './ws.js';
 import { SessionManager } from './sessionManager.js';
@@ -76,6 +77,30 @@ app.use(
 );
 
 app.use('/api', createApiRouter(manager));
+
+// ── 요청 단위 에러 핸들러 ──────────────────────────────────────────────────
+// 폰 브라우저는 화면 꺼짐/탭 전환/WiFi 끊김으로 '업로드 중인' 요청을 자주 끊는다.
+// 그러면 body-parser 가 BadRequestError(type='request.aborted') 를 던지는데,
+// 핸들러가 없으면 express 기본 핸들러가 스택 전체를 stderr 에 찍어 콘솔이 크래시처럼
+// 보인다(실제로는 서버 정상). 라우터 뒤에 놓아야 에러가 여기로 온다.
+const onRequestError: ErrorRequestHandler = (err, _req, res, next) => {
+  const type = (err as { type?: string })?.type;
+  const code = (err as { code?: string })?.code;
+  if (type === 'request.aborted' || code === 'ECONNABORTED' || code === 'ECONNRESET') {
+    // 소켓이 이미 죽어 응답을 보낼 곳이 없다. 서버 잘못도 아니니 한 줄만 남긴다.
+    console.warn('요청 중단(클라이언트 연결 끊김) — 무시');
+    return;
+  }
+  if (type === 'entity.too.large') {
+    res.status(413).json({ error: '첨부가 너무 큽니다 (50MB 제한)' });
+    return;
+  }
+  // 그 외 진짜 에러만 server.log 에 남긴다.
+  if (res.headersSent) return next(err);
+  logServer('request', err);
+  res.status(500).json({ error: 'internal error' });
+};
+app.use(onRequestError);
 
 const server = createServer(app);
 // listen 실패(EADDRINUSE 등)는 server 의 'error' 이벤트로 온다. 핸들러가 없으면

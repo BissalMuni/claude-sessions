@@ -6,7 +6,7 @@ import { bumpFolderFreq } from './folderFreq.js';
 import { resolvePermission, resolveQuestion, type Answers, type Decision } from './permissions.js';
 import { flushSessions, loadPersistedSessions, markEnded, saveSession } from './sessionStore.js';
 import { sessionVisibleTo, type Account } from './auth.js';
-import type { AuxStatus, InputImage, ServerEvent, SessionView } from './types.js';
+import type { AuxStatus, Diagnosis, InputImage, ServerEvent, SessionView } from './types.js';
 
 /** 세션 풀을 관리하고 변경을 구독자(WebSocket)에게 알린다 */
 export class SessionManager {
@@ -116,6 +116,13 @@ export class SessionManager {
     if (!session) return false;
     session.compact();
     return true;
+  }
+
+  /** 응답 지연 진단(폰 진단 버튼) — 세션이 없으면 null */
+  diagnose(id: string): Diagnosis | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    return session.diagnose();
   }
 
   /** 진행 중인 턴 중단 */

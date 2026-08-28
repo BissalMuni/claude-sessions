@@ -42,6 +42,18 @@ On boot the server prints the LAN URLs (`http://<PC-IP>:8787`) and the token. Op
 - `SCREEN_DANGER` — **dangerous mode (default ON).** Set `SCREEN_DANGER=0` to start in safe mode; any other value (or unset) starts ON. When on, `canUseTool` auto-allows every tool *except* `AskUserQuestion` without prompting the phone. The only path that reaches the phone is the agent calling `AskUserQuestion` itself. A shared "constitution" is injected into every session (via `systemPrompt: { preset: 'claude_code', append }`) instructing the agent to stop and ask via `AskUserQuestion` on project-direction decisions (architecture/tech choices, ambiguous requirements, irreversible/risky actions, large scope changes). Safe mode (`SCREEN_DANGER=0`) keeps the original behavior — every tool routes through the phone for Yes/No. The env var only sets the **initial** value; danger is a **runtime toggle** (`dangerMode.ts`) flippable live from the phone (`GET`/`POST /api/danger`) and synced to all devices over WS (`danger` event + on the connect `snapshot`). `canUseTool` reads `isDanger()` per call, so a toggle takes effect on in-flight sessions immediately; the constitution's danger warning only changes for sessions started after the toggle (a live session's `systemPrompt` can't be rewritten).
 - `SDK_DEBUG=1` — enable SDK subprocess debug output; `DEBUG_BLOCKS=1` — dump every SDK message's block types to console
 
+### Logs and error tracking
+
+Files are split by *what they are*, not by who wrote them — mixing diagnostics into the error log once made real failures 4 entries out of 1031, so `grep` aggregation was useless.
+
+- `logs/errors.log` — **failures only** (stream exceptions, compaction/context-query failures), with stack traces.
+- `logs/diag.log` — **observations only** (`[compaction] 적용됨`, `[context/*] total=…`). Not failures; never mix these back into `errors.log`.
+- `logs/conn.log` — one `key=value` line per connection failure, with the turn context needed to correlate (elapsed, ttft, toolMs, lastTool, ctx, retry). Exists because the SDK often reports connection errors *not* as thrown exceptions but as a `result` subtype or plain assistant text — `logConnError` catches all three paths (`src=throw|result|text`).
+- `logs/perf.log` — per-turn latency (TTFT / model / tool / overhead).
+- `.data/errors.jsonl` (`errorStore.ts`) — **append-only, survives restarts.** Everything else is either in-memory (`consumeRetries`, `streamRetryTotal`) or capped (`MAX_MESSAGES = 300`), so retry-recovered errors — the most common kind — used to vanish and frequency could not be counted. Rotates to `.jsonl.1` past 5MB. Aggregate with e.g. `jq -r .message .data/errors.jsonl | sort | uniq -c | sort -rn`.
+
+`logs/` and `.data/` are both gitignored.
+
 ## Architecture
 
 Request/event flow: **phone → REST/WS (`api.ts`/`ws.ts`) → `SessionManager` → `Session` (SDK `query()` loop) → `canUseTool` → back out to phone for approval.**

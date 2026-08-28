@@ -97,6 +97,55 @@ export interface ContextUsage {
   compactAt: number | null;
 }
 
+/**
+ * 한 턴의 응답 지연 실측치(진단용 인메모리 링에 쌓인다). recordPerf 가 계산한 값과 동일 —
+ * logs/perf.log 로만 흘려보내던 걸 진단 버튼이 읽을 수 있게 세션 메모리에도 보관한다.
+ */
+export interface TurnPerf {
+  at: string; // ISO 시각
+  wallMs: number; // 턴 총 소요(벽시계, 없으면 SDK duration_ms)
+  apiMs: number; // 모델 API 시간(미상이면 -1)
+  toolMs: number; // 도구 실행 합
+  toolCount: number;
+  ttftMs: number; // 첫 토큰까지(미상이면 -1)
+  ctx: number; // 상주 컨텍스트(마지막 왕복 프롬프트 토큰)
+  turnCtx: number; // 턴 누적(비용 지표)
+  cacheHitPct: number; // 캐시 히트율
+  output: number; // 출력 토큰
+}
+
+/** 진단 소견 한 줄 */
+export interface DiagnosisFinding {
+  level: 'ok' | 'warn' | 'crit';
+  text: string;
+}
+
+/** 진단이 제시하는 권장 액션(폰이 버튼으로 그린다). 실행은 사용자가 눌러야 한다. */
+export interface DiagnosisAction {
+  kind: 'compact' | 'restart' | 'interrupt';
+  label: string;
+  note?: string;
+}
+
+/** 세션 응답 지연 진단 결과 */
+export interface Diagnosis {
+  severity: 'ok' | 'warn' | 'crit'; // 종합 심각도(무거움/보통/양호)
+  headline: string; // 한 줄 요약
+  findings: DiagnosisFinding[]; // 근거
+  actions: DiagnosisAction[]; // 권장 대응(수동 실행)
+  metrics: {
+    ctx: number; // 상주 컨텍스트
+    max: number; // 모델 한도
+    compactAt: number | null; // 실제 자동압축 임계값
+    lastApiMs: number; // 최근 턴 모델 시간
+    medianApiMs: number; // 최근 턴들의 모델 시간 중앙값
+    maxApiMs: number; // 최근 턴 최대 모델 시간
+    cacheHitPct: number; // 최근 캐시 히트율
+    retryCount: number; // 이번 세션 스트림 오류(ECONNRESET 등) 재시도 누적
+    turns: number; // 진단에 쓴 턴 표본 수
+  };
+}
+
 /** 보조 서버(정적/업로드) 상태 — 한 개 */
 export interface AuxOne {
   running: boolean;

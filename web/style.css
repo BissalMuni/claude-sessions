@@ -112,6 +112,9 @@ input, textarea {
 }
 .tb-menu-item:active { background: var(--line); }
 .tb-menu-hint { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 400; }
+/* 위험 모드 ON: 메뉴 항목을 빨갛게 강조(자동 실행 중 경고). OFF는 기본색(안전). */
+#tb-danger.danger-on { color: #fca5a5; font-weight: 700; }
+#tb-danger.danger-on .tb-menu-hint { color: var(--red); }
 /* 보조 서버 모달 */
 .aux-dir-row { display: flex; gap: 8px; }
 .aux-dir-row input { flex: 1 1 auto; min-width: 0; }
@@ -250,7 +253,7 @@ input, textarea {
 .composer button { flex: none; }
 .attach-btn { height: 44px; font-size: 21.6px; line-height: 1; padding: 0 12px; }
 
-/* 빠른 실행 버튼 바 (현황 / 커푸 / 이전·다음 / 새로고침 / 위험 ON·OFF — 6버튼 나란히) */
+/* 빠른 실행 버튼 바 (현황 / 커푸 / 이전·다음 / 복사·인계 / CPT) — 위험 토글은 ⋮ 메뉴로 이동 */
 .quick-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .qa-btn {
   flex: 1 1 0; min-width: 0; padding: 9px 4px; white-space: nowrap;
@@ -259,25 +262,11 @@ input, textarea {
 }
 .qa-btn:active { background: var(--line); }
 .qa-btn.qa-nav { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; }
-/* 새로고침: 기호 버튼 — 좁게, 회전 기호 크게 */
-.qa-btn.qa-refresh { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; font-size: 18px; }
-/* CPT(컴팩션): 위험 버튼 앞 보조 버튼 — 강조색 테두리로 구분 */
+/* 복사·인계: 기호 버튼 — 좁게, 아이콘 크게 */
+.qa-btn.qa-copy { flex: 0 0 auto; min-width: 36px; color: var(--muted); font-weight: 400; font-size: 17px; }
+/* CPT(컴팩션): 보조 버튼 — 강조색 테두리로 구분 */
 .qa-btn.qa-compact { flex: 0 0 auto; min-width: 44px; color: var(--accent); border-color: var(--accent); font-weight: 700; font-size: 13px; }
 .qa-btn.qa-compact:active { background: rgba(59,130,246,.18); }
-/* 위험 모드 ON/OFF 토글: ON=빨강(자동 실행 경고), OFF=초록(안전) */
-/* 위험 버튼: 라벨을 2줄(위험/ON)로 쪼개고 폰트를 줄여 너비는 최소, 높이는 다른 버튼과 동일 */
-.qa-btn.qa-danger {
-  flex: 0 0 auto;
-  min-width: 45px;
-  padding: 3px 6px;
-  font-size: 12px;
-  line-height: 1.35;
-  font-weight: 700;
-  border-width: 2px;
-}
-.qa-btn.qa-danger.on  { background: rgba(239,68,68,.18);  color: #fca5a5; border-color: var(--red); }
-.qa-btn.qa-danger.off { background: rgba(34,197,94,.16); color: #86efac; border-color: var(--green); }
-.qa-btn.qa-danger:active { filter: brightness(1.25); }
 
 /* 첨부 이미지 미리보기 */
 .thumbs { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -386,3 +375,28 @@ button.ghost.danger:disabled { opacity: .4; }
 .app-grp-name { font-weight: 700; font-size: 13.5px; }
 .app-grp-meta { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .mem-row.app-row { padding-left: 14px; }
+
+/* 응답 지연 진단 모달 */
+.diag-body { display: flex; flex-direction: column; gap: 12px; }
+.diag-headline { font-size: 16px; line-height: 1.4; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel2); }
+.diag-headline .diag-badge { display: inline-block; font-weight: 700; font-size: 13px; padding: 2px 9px; border-radius: 999px; margin-right: 8px; vertical-align: middle; }
+.diag-sev-crit { border-color: var(--red); }
+.diag-sev-crit .diag-badge { background: rgba(239,68,68,.18); color: var(--red); }
+.diag-sev-warn { border-color: var(--amber); }
+.diag-sev-warn .diag-badge { background: rgba(245,158,11,.18); color: var(--amber); }
+.diag-sev-ok { border-color: var(--green); }
+.diag-sev-ok .diag-badge { background: rgba(34,197,94,.18); color: var(--green); }
+.diag-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.diag-f { font-size: 15px; line-height: 1.45; padding: 10px 12px; border-radius: 8px; border-left: 3px solid var(--line); background: var(--panel2); }
+.diag-f.diag-crit { border-left-color: var(--red); }
+.diag-f.diag-warn { border-left-color: var(--amber); }
+.diag-f.diag-ok { border-left-color: var(--green); color: var(--muted); }
+.diag-metrics { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; line-height: 1.5; word-break: break-word; }
+.diag-actions-label { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.diag-actions { display: flex; flex-direction: column; gap: 8px; }
+.diag-act { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; text-align: left; padding: 11px 13px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); font-size: 15px; font-weight: 600; }
+.diag-act:active { background: var(--line); }
+.diag-act-restart { border-color: var(--accent); color: var(--accent); }
+.diag-act-compact { border-color: var(--green); color: var(--green); }
+.diag-act-interrupt { border-color: var(--amber); color: var(--amber); }
+.diag-act-note { font-weight: 400; font-size: 12.5px; color: var(--muted); }
