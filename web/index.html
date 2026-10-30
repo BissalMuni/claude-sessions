@@ -8,12 +8,13 @@
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <!-- 토큰 입력 게이트 -->
+    <!-- 로그인 게이트 (아이디 + 비밀번호) -->
     <div id="gate" class="gate">
       <div class="gate-box">
         <h1>claude-sessions</h1>
-        <p>서버 콘솔에 출력된 토큰을 입력하세요.</p>
-        <input id="token-input" type="text" inputmode="text" placeholder="토큰" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+        <p>아이디와 비밀번호를 입력하세요.</p>
+        <input id="id-input" type="text" inputmode="text" placeholder="아이디" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" />
+        <input id="pw-input" type="password" placeholder="비밀번호" autocomplete="current-password" />
         <button id="token-btn">접속</button>
         <div id="gate-err" class="err"></div>
       </div>
@@ -33,19 +34,33 @@
           <div id="tb-menu-pop" class="tb-menu-pop hidden">
             <button id="tb-danger" class="tb-menu-item" title="위험 모드: 켜면 모든 도구를 묻지 않고 자동 실행(AskUserQuestion만 폰 질문)">위험 모드 <span class="tb-menu-hint" id="tb-danger-hint">ON</span></button>
             <button id="tb-reset" class="tb-menu-item tb-sess hidden" title="이 세션을 닫고 같은 폴더로 새 세션 열기(대화/컨텍스트 초기화)">리셋 <span class="tb-menu-hint">같은 폴더로 새 세션</span></button>
+            <button id="files-btn" class="tb-menu-item">파일 <span class="tb-menu-hint">프로젝트 파일 보기/다운로드</span></button>
             <button id="aux-btn" class="tb-menu-item">서버 <span class="tb-menu-hint">보조 서버(정적/업로드)</span></button>
             <button id="tb-diagnose" class="tb-menu-item tb-sess hidden" title="응답이 느린 원인(컨텍스트/모델시간/연결오류)을 분석하고 대응을 제안">진단 <span class="tb-menu-hint">응답 지연 원인 분석</span></button>
             <button id="tb-remove" class="tb-menu-item tb-sess hidden">종료 <span class="tb-menu-hint">이 세션 닫기</span></button>
+            <button id="tb-restart" class="tb-menu-item" title="컨트롤러 서버를 정상 종료하면 start-server.bat 창이 3초 뒤 다시 띄운다. 세션은 복원된다.">서버 재시작 <span class="tb-menu-hint">컨트롤러 재기동(세션 복원)</span></button>
             <button id="logout-btn" class="tb-menu-item">로그아웃 <span class="tb-menu-hint">다른 계정으로 접속</span></button>
           </div>
         </div>
       </header>
 
       <main class="layout">
-        <aside id="list" class="list"></aside>
-        <section id="detail" class="detail">
-          <div class="empty">세션을 선택하거나 새로 만드세요.</div>
-        </section>
+        <aside id="side" class="list">
+          <div class="side-tabs">
+            <button id="side-tab-sessions" class="side-tab on">💬 세션</button>
+            <button id="side-tab-files" class="side-tab">📁 파일</button>
+          </div>
+          <div id="list"></div>
+          <div id="file-tree" class="hidden"></div>
+        </aside>
+        <div id="side-splitter" class="splitter" title="드래그로 폭 조절"></div>
+        <div class="main-col">
+          <section id="detail" class="detail">
+            <div class="empty">세션을 선택하거나 새로 만드세요.</div>
+          </section>
+          <div id="splitter" class="splitter hidden" title="드래그로 폭 조절"></div>
+          <section id="file-pane" class="file-pane hidden"></section>
+        </div>
       </main>
     </div>
 
@@ -121,6 +136,7 @@
       </div>
     </div>
 
+    <script src="/vocab.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

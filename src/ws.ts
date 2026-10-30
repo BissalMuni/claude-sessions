@@ -38,20 +38,22 @@ export function attachWebSocket(server: Server, manager: SessionManager): void {
     ws.on('pong', () => alive.add(ws));
 
     // 접속 직후 현재 전체 상태 전송 (계정 격리: 볼 수 있는 세션만) (+ 위험 모드 + 보조 서버)
+    // restricted: root 샌드박스 계정 여부 — 클라이언트가 서버 현황/위험모드 등 관리 UI 를 숨긴다.
     ws.send(
       JSON.stringify({
         type: 'snapshot',
         sessions: manager.listFor(account),
         danger: manager.isDanger(),
         aux: auxStatus(),
+        restricted: !!account.root,
       }),
     );
 
     // 이후 변경을 구독. 격리: 이 계정이 못 보는 세션의 업데이트는 흘려보내지 않는다.
-    // (session_removed 는 sessionId 만 있어 소유 판별 불가하지만, 클라가 모르는 id 삭제는 무해하므로 그대로 전달.)
+    // (session_removed 는 sessionId 만 있어 경로 판별 불가하지만, 클라가 모르는 id 삭제는 무해하므로 그대로 전달.)
     const unsubscribe = manager.subscribe((event) => {
       if (ws.readyState !== ws.OPEN) return;
-      if (event.type === 'session_update' && !sessionVisibleTo(event.session.ownerId, account)) return;
+      if (event.type === 'session_update' && !sessionVisibleTo(event.session.cwd, account)) return;
       ws.send(JSON.stringify(event));
     });
 

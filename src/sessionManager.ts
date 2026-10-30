@@ -173,13 +173,13 @@ export class SessionManager {
   /** 이 계정이 그 세션을 볼/조작할 수 있는가(격리 검사). 없는 세션이면 false. */
   canAccess(id: string, account?: Account): boolean {
     const v = this.sessions.get(id)?.view();
-    return !!v && sessionVisibleTo(v.ownerId, account);
+    return !!v && sessionVisibleTo(v.cwd, account);
   }
 
-  /** 계정이 볼 수 있는 세션만 반환(소유 세션 + 레거시/공유). */
+  /** 계정이 볼 수 있는 세션만 반환(root 서브트리 안의 세션 — 같은 root 계정끼리 공유). */
   getFor(id: string, account?: Account): SessionView | null {
     const v = this.get(id);
-    return v && sessionVisibleTo(v.ownerId, account) ? v : null;
+    return v && sessionVisibleTo(v.cwd, account) ? v : null;
   }
 
   list(): SessionView[] {
@@ -188,7 +188,7 @@ export class SessionManager {
 
   /** 계정이 볼 수 있는 세션 목록(격리). */
   listFor(account?: Account): SessionView[] {
-    return this.list().filter((v) => sessionVisibleTo(v.ownerId, account));
+    return this.list().filter((v) => sessionVisibleTo(v.cwd, account));
   }
 
   /**

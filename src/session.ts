@@ -25,6 +25,15 @@ import type {
 
 const MAX_MESSAGES = 300; // 폰 메모리 보호: 최근 N개만 유지
 
+// 모든 세션이 쓸 모델. 지정하지 않으면 CLI 기본 모델을 따라가므로 명시한다.
+// SCREEN_MODEL 로 덮어쓸 수 있다 (별칭 'opus'/'sonnet' 또는 정식 ID 'claude-fable-5' 등).
+// 기본은 Opus. 하드코딩 기본값을 .env 와 같은 값으로 두는 게 중요하다 — 다르면 .env 가
+// 없거나 늦게 읽힌 상황에서 조용히 다른 모델로 뜬다(실제로 그래서 6일간 Fable 로 돌았다).
+const MODEL = process.env.SCREEN_MODEL || 'claude-opus-5-5';
+// Fable 이 과부하/일시 불가일 때만 대체. SDK 는 매 사용자 턴 시작에 주 모델을 다시
+// 시도하므로, 잠깐의 장애로 세션이 영구히 강등되지는 않는다.
+const FALLBACK_MODEL = process.env.SCREEN_FALLBACK_MODEL || 'claude-opus-5';
+
 // 위험 모드는 런타임 토글(dangerMode.ts)로 관리한다. 켜지면 AskUserQuestion(프로젝트
 // 방향 결정)을 제외한 모든 도구를 폰에 묻지 않고 자동 허용한다. 기본은 ON.
 // canUseTool 안에서 isDanger() 를 매 호출마다 읽으므로, 폰 스위치로 즉시 반영된다.
@@ -274,6 +283,8 @@ export class Session {
       options: {
         cwd: this.cwd,
         abortController: this.abort,
+        model: MODEL,
+        fallbackModel: FALLBACK_MODEL,
         // 복원 케이스: 이전 SDK 세션을 이어받는다(~/.claude/projects/ 의 transcript 로드).
         // 없으면 undefined → 새 세션으로 시작. resume 는 streaming-input 모드와 함께 동작한다.
         ...(this.sdkSessionId ? { resume: this.sdkSessionId } : {}),

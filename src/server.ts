@@ -11,6 +11,8 @@ import { SessionManager } from './sessionManager.js';
 import { isDanger } from './dangerMode.js';
 import { ACCOUNTS } from './auth.js';
 import { stopAllAux } from './auxServers.js';
+import { registerShutdown } from './restart.js';
+import { pruneCache } from './convert.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const HOST = process.env.HOST || '0.0.0.0'; // LAN 의 다른 기기에서 접속 가능하게
@@ -61,7 +63,21 @@ process.on('exit', (code) => logServer('exit', `code=${code}`));
 const manager = new SessionManager();
 // 재기동: 디스크에 저장된 세션들을 SDK resume 으로 되살린다.
 const restoredCount = manager.restore();
+pruneCache(); // 오피스 미리보기 PDF 캐시 청소 (500MB 초과분)
 const app = express();
+
+// 루트 도메인 → sessions 서브도메인 리다이렉트.
+// 426labs.cloud 도 같은 터널로 이 서버에 들어오는데, 콘텐츠는 sessions.426labs.cloud
+// (Cloudflare Access 게이트가 걸린 호스트)에서만 서빙한다. 다른 어떤 라우트보다
+// 먼저 실행돼야 하므로 최상단에 둔다.
+app.use((req, res, next) => {
+  const host = (req.headers.host ?? '').split(':')[0].toLowerCase();
+  if (host === '426labs.cloud') {
+    return res.redirect(301, 'https://sessions.426labs.cloud' + req.originalUrl);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '50mb' })); // base64 이미지/파일 첨부 수용
 
 // 최신 기기용 SPA (정적). 토큰은 UI 안에서 입력받아 API/WS 호출에 붙인다.
@@ -143,20 +159,25 @@ server.listen(PORT, HOST, () => {
 // kill(SIGTERM) 을 모두 잡아 로그에 남긴다. 이래야 server.log 가 비어있지 않고
 // "외부에서 종료됨(=크래시 아님)"인지 "내부 에러로 죽음"인지 다음엔 바로 구분된다.
 let shuttingDown = false;
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
-  process.on(sig, () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    logServer('signal', `${sig} 수신 → 정상 종료 (크래시 아님, 외부 종료)`);
-    manager.shutdown();
-    void stopAllAux(); // 보조 서버(정적/업로드)도 함께 닫는다
+/** 정상 종료 절차 한 곳. 신호(창 닫기/Ctrl+C/kill)와 폰의 재시작 요청이 공용으로 쓴다. */
+function gracefulExit(tag: string, reason: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logServer(tag, reason);
+  manager.shutdown();
+  void stopAllAux(); // 보조 서버(정적/업로드)도 함께 닫는다
 
-    // 소켓이 늦게 닫혀도 창이 영영 안 닫히지 않게 안전 타임아웃 후 강제 종료.
-    const t = setTimeout(() => process.exit(0), 2000);
-    if (typeof t.unref === 'function') t.unref();
-    server.close(() => process.exit(0));
-  });
+  // 소켓이 늦게 닫혀도 창이 영영 안 닫히지 않게 안전 타임아웃 후 강제 종료.
+  const t = setTimeout(() => process.exit(0), 2000);
+  if (typeof t.unref === 'function') t.unref();
+  server.close(() => process.exit(0));
 }
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) {
+  process.on(sig, () => gracefulExit('signal', `${sig} 수신 → 정상 종료 (크래시 아님, 외부 종료)`));
+}
+// 폰의 '서버 재시작' 버튼이 쓰는 경로. exit 0 으로 끝나야 start-server.bat 의 :loop 가
+// 다시 띄운다(88 이상이면 :dup 으로 빠져 재시작하지 않는다).
+registerShutdown((reason) => gracefulExit('restart', `${reason} → 정상 종료, 감시자가 재기동`));
 
 /** LAN IPv4 주소들 */
 function lanIps(): string[] {

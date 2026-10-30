@@ -1,10 +1,15 @@
 import { Router } from 'express';
+import { statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { requireToken } from './auth.js';
-import { browse, defaultStartPath, isWithinRoot } from './browse.js';
+import { browse, browseFiles, defaultStartPath, isWithinRoot } from './browse.js';
+import { CONVERTIBLE_EXT, findSoffice, resetSofficeCache, toPdf } from './convert.js';
+import { extractPptxVideos } from './pptxMedia.js';
 import { auxStatus, startAux, stopAux, type AuxKind } from './auxServers.js';
 import { saveUploads } from './uploads.js';
 import { getFolderFreq } from './folderFreq.js';
 import { serverStatus, memStatus, killProcess, appProcesses } from './servers.js';
+import { findSupervisor, requestRestart, RESTART_DELAY_MS } from './restart.js';
 import type { SessionManager } from './sessionManager.js';
 import type { InputFile, InputImage } from './types.js';
 
@@ -36,6 +41,15 @@ function parseFiles(raw: unknown): InputFile[] | null {
   return out;
 }
 
+/** statSync 가 throw 하지 않는 버전 (없으면 null) */
+function statSafe(p: string) {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+}
+
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -65,6 +79,108 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ freq: getFolderFreq() });
   });
 
+  // 파일 탐색기 — 폴더+파일 목록 (계정 루트로 제한)
+  router.get('/files', (req, res) => {
+    const path = typeof req.query.path === 'string' ? req.query.path : '';
+    res.json(browseFiles(path, req.account?.root ?? null));
+  });
+
+  // 파일 전송(브라우저 보기/재생/다운로드) — 계정 루트 안만. sendFile 이
+  // MIME 판별과 Range(영상 탐색) 를 처리한다. ?download=1 이면 강제 다운로드.
+  router.get('/file', (req, res) => {
+    const p = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!p) return res.status(400).json({ error: 'path required' });
+    const abs = resolve(p);
+    if (!isWithinRoot(req.account?.root ?? null, abs)) {
+      return res.status(403).json({ error: 'outside root' });
+    }
+    let st;
+    try {
+      st = statSync(abs);
+    } catch {
+      return res.status(404).json({ error: 'not found' });
+    }
+    if (!st.isFile()) return res.status(404).json({ error: 'not a file' });
+    if (req.query.download === '1') return res.download(abs);
+    res.sendFile(abs);
+  });
+
+  // 오피스 문서 미리보기 — pptx/docx/xlsx 등을 LibreOffice 로 PDF 변환해 보낸다.
+  // 캐시 적중이면 즉시, 아니면 수 초 소요. LibreOffice 미설치면 503 (뷰어가 안내 표시).
+  router.get('/preview', async (req, res) => {
+    const p = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!p) return res.status(400).json({ error: 'path required' });
+    const abs = resolve(p);
+    if (!isWithinRoot(req.account?.root ?? null, abs)) {
+      return res.status(403).json({ error: 'outside root' });
+    }
+    let st;
+    try {
+      st = statSync(abs);
+    } catch {
+      return res.status(404).json({ error: 'not found' });
+    }
+    if (!st.isFile()) return res.status(404).json({ error: 'not a file' });
+    const ext = abs.slice(abs.lastIndexOf('.') + 1).toLowerCase();
+    if (!CONVERTIBLE_EXT.has(ext)) {
+      return res.status(400).json({ error: '변환을 지원하지 않는 형식: ' + ext });
+    }
+    resetSofficeCache(); // 설치 직후에도 즉시 인식되도록 매번 재탐색 (existsSync 2회 — 저렴)
+    if (!findSoffice()) {
+      return res.status(503).json({ error: 'LibreOffice가 설치되어 있지 않습니다' });
+    }
+    try {
+      const pdf = await toPdf(abs);
+      res.setHeader('Content-Type', 'application/pdf');
+      // 캐시가 .data(닷폴더) 아래라 기본 dotfiles:'ignore' 면 404 가 난다 — 반드시 allow
+      res.sendFile(pdf, { dotfiles: 'allow' });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // pptx 안의 영상 목록 — PDF 미리보기 아래에 재생 가능한 영상을 붙이기 위한 보조.
+  // 응답: { videos: [{slide, name}] } (영상 없으면 빈 배열)
+  router.get('/preview-media', (req, res) => {
+    const p = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!p) return res.status(400).json({ error: 'path required' });
+    const abs = resolve(p);
+    if (!isWithinRoot(req.account?.root ?? null, abs)) {
+      return res.status(403).json({ error: 'outside root' });
+    }
+    if (!/\.pptx$/i.test(abs) || !statSafe(abs)?.isFile()) {
+      return res.json({ videos: [] }); // pptx 외 형식/없는 파일은 조용히 빈 목록
+    }
+    try {
+      res.json({ videos: extractPptxVideos(abs).videos });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // pptx 추출 영상 파일 전송 — name 은 추출 캐시 폴더 안 파일명만 허용(경로 탈출 차단).
+  // sendFile 이 Range(모바일 영상 탐색)를 처리한다.
+  router.get('/preview-media/file', (req, res) => {
+    const p = typeof req.query.path === 'string' ? req.query.path : '';
+    const name = typeof req.query.name === 'string' ? req.query.name : '';
+    if (!p || !name) return res.status(400).json({ error: 'path/name required' });
+    const abs = resolve(p);
+    if (!isWithinRoot(req.account?.root ?? null, abs)) {
+      return res.status(403).json({ error: 'outside root' });
+    }
+    if (!/^[\w.-]+$/.test(name)) return res.status(400).json({ error: 'bad name' });
+    try {
+      const { dir } = extractPptxVideos(abs); // 캐시 적중이면 manifest 읽기만
+      const file = resolve(dir, name);
+      if (!file.startsWith(resolve(dir)) || !statSafe(file)?.isFile()) {
+        return res.status(404).json({ error: 'not found' });
+      }
+      res.sendFile(file, { dotfiles: 'allow' });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   // 위험 모드 조회
   router.get('/danger', (_req, res) => {
     res.json({ danger: manager.isDanger() });
@@ -75,8 +191,34 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ aux: auxStatus() });
   });
 
+  // ── 시스템 관리 라우트 가드 ──
+  // 서버 현황/프로세스 목록/강제 종료/위험모드 전환은 PC 전체에 영향을 주므로
+  // root 샌드박스 계정(동료용)에게는 금지 — 무제한 계정만 통과.
+  const fullOnly: import('express').RequestHandler = (req, res, next) => {
+    if (req.account?.root) return res.status(403).json({ error: 'forbidden (restricted account)' });
+    next();
+  };
+
+  // 재시작 가능 여부만 미리 확인(버튼을 누르기 전 안내용). 종료는 하지 않는다.
+  router.get('/restart', fullOnly, async (_req, res) => {
+    res.json(await findSupervisor());
+  });
+
+  // 컨트롤러 서버 재시작. 서버가 스스로 되살아나는 게 아니라, 정상 종료하면
+  // start-server.bat 의 :loop(cmd 창)가 3초 뒤 다시 띄우는 구조다 — 그래서 감시자가
+  // 없으면 '죽기만 하고 안 살아나는' 상태가 되므로 409 로 거부한다. restart.ts 참고.
+  router.post('/restart', fullOnly, async (_req, res) => {
+    const sup = await findSupervisor();
+    if (!sup.ok) return res.status(409).json({ error: sup.reason ?? '재시작할 수 없습니다' });
+    if (!requestRestart('폰에서 재시작 요청')) {
+      return res.status(500).json({ error: '종료 절차가 등록되지 않았습니다 (서버 기동 미완료)' });
+    }
+    // 응답을 먼저 보낸다 — 먼저 끊으면 폰은 성공을 네트워크 오류로 본다.
+    res.json({ ok: true, via: sup.via, delayMs: RESTART_DELAY_MS });
+  });
+
   // 로컬 서버 현황 — 이 PC 에서 LISTEN 중인 포트(알려진 고정 서버 + 기타)
-  router.get('/servers', async (_req, res) => {
+  router.get('/servers', fullOnly, async (_req, res) => {
     try {
       res.json(await serverStatus());
     } catch (e) {
@@ -85,7 +227,7 @@ export function createApiRouter(manager: SessionManager): Router {
   });
 
   // RAM 사용현황 — 시스템 전체 메모리 + 프로세스별 사용량 상위 목록.
-  router.get('/processes', async (_req, res) => {
+  router.get('/processes', fullOnly, async (_req, res) => {
     try {
       res.json(await memStatus());
     } catch (e) {
@@ -94,7 +236,7 @@ export function createApiRouter(manager: SessionManager): Router {
   });
 
   // 앱별 프로세스 목록 — VS Code/Edge/Chrome 인스턴스를 묶어서(모든 인스턴스) 반환.
-  router.get('/app-processes', async (_req, res) => {
+  router.get('/app-processes', fullOnly, async (_req, res) => {
     try {
       res.json(await appProcesses());
     } catch (e) {
@@ -104,7 +246,7 @@ export function createApiRouter(manager: SessionManager): Router {
 
   // 선택 프로세스 종료 — 특정 PID 만. 서버 자신/OS 핵심 프로세스는 servers.ts 가드가 거부.
   // body: { pid: number }
-  router.post('/kill', async (req, res) => {
+  router.post('/kill', fullOnly, async (req, res) => {
     const pid = Number((req.body ?? {}).pid);
     if (!Number.isInteger(pid)) return res.status(400).json({ ok: false, reason: 'pid 필요' });
     try {
@@ -115,8 +257,9 @@ export function createApiRouter(manager: SessionManager): Router {
   });
 
   // 보조 서버 열기/닫기 — 정적 파일 서버 또는 업로드 서버.
+  // 전역 자원(LAN 포트)이고 stop 은 폴더 검사도 안 타므로 무제한 계정 전용.
   // body: { kind:'static'|'upload', action:'start'|'stop', dir?, port? }
-  router.post('/aux', async (req, res) => {
+  router.post('/aux', fullOnly, async (req, res) => {
     const { kind, action, dir, port } = req.body ?? {};
     if (kind !== 'static' && kind !== 'upload') {
       return res.status(400).json({ error: "kind는 'static'|'upload'" });
@@ -146,8 +289,9 @@ export function createApiRouter(manager: SessionManager): Router {
     res.json({ aux });
   });
 
-  // 위험 모드 토글 (폰 ON/OFF 스위치) — 모든 기기에 동기화 브로드캐스트됨
-  router.post('/danger', (req, res) => {
+  // 위험 모드 토글 (폰 ON/OFF 스위치) — 모든 기기에 동기화 브로드캐스트됨.
+  // 전역(모든 세션 공통) 설정이므로 샌드박스 계정은 전환 불가.
+  router.post('/danger', fullOnly, (req, res) => {
     const { danger } = req.body ?? {};
     if (typeof danger !== 'boolean') {
       return res.status(400).json({ error: 'danger(boolean)가 필요합니다' });

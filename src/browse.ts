@@ -1,4 +1,4 @@
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, statSync } from 'node:fs';
 import { join, parse, dirname, resolve, relative, isAbsolute } from 'node:path';
 
 export interface BrowseResult {
@@ -99,4 +99,42 @@ export function browse(path: string, root: string | null = null): BrowseResult {
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  size: number;
+}
+
+/**
+ * 폴더+파일 탐색(웹 UI 파일 탐색기용). 폴더 규칙은 browse() 와 동일(샌드박스 포함),
+ * 여기에 현재 폴더의 파일 목록(이름순, 숨김 제외)을 더해 돌려준다.
+ */
+export function browseFiles(
+  path: string,
+  root: string | null = null,
+): BrowseResult & { files: FileEntry[] } {
+  const r = browse(path, root);
+  let files: FileEntry[] = [];
+  if (!r.isRoot && !r.error && r.path) {
+    try {
+      files = readdirSync(r.path, { withFileTypes: true })
+        .filter((e) => e.isFile() && !e.name.startsWith('.'))
+        .map((e) => {
+          const p = join(r.path, e.name);
+          let size = 0;
+          try {
+            size = statSync(p).size;
+          } catch {
+            /* 깨진 링크 등 — 크기만 0 으로 */
+          }
+          return { name: e.name, path: p, size };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      /* 읽기 권한 없음 — 폴더 목록만 보여준다 */
+    }
+  }
+  return { ...r, files };
 }

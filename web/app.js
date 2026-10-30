@@ -22,6 +22,12 @@ const state = {
   aux: { static: { running: false }, upload: { running: false } }, // 보조 서버 상태(서버 동기화)
   pickerPick: null, // 폴더 피커가 '단일 폴더 선택' 모드일 때의 콜백(있으면 세션 생성 대신 이 콜백 호출)
   serversTimer: null, // 서버 현황 페이지를 보는 동안의 자동 새로고침 타이머
+  sideTab: 'sessions', // 사이드바 탭: 'sessions' | 'files'
+  fileDir: '', // 파일 트리의 현재 폴더(탭 전환 시 위치 유지)
+  fileTreeFor: undefined, // 파일 트리가 어느 세션 기준으로 열렸는지(세션 바뀌면 cwd 로 재루트)
+  treeOpen: new Set(), // 트리에서 펼쳐 둔 폴더 경로들(접기/펼치기 상태 유지)
+  openFile: null, // 파일 패널(분할 화면)로 열린 파일 { name, path, size }
+  restricted: false, // root 샌드박스 계정 여부(스냅샷 동기화) — 관리 UI(서버 현황/위험모드) 숨김
 };
 
 // 목록 맨 위 고정 항목: 세션이 아니라 "서버 현황" 특수 페이지를 가리키는 센티넬 id.
@@ -63,6 +69,9 @@ function selectSession(id) {
   state.selected = id;
   clearNotice(id);
   if (id != null) { const s = state.sessions.get(id); if (s) state.prevStatus.set(id, s.status); }
+  // 파일 탭이 열려 있으면 트리를 새 세션의 작업 폴더로 다시 뿌린다
+  // (파일 패널은 분할 화면이라 세션을 바꿔도 열린 채 유지된다)
+  if (state.sideTab === 'files') void loadTreeForCurrent();
   render();
 }
 
@@ -108,13 +117,16 @@ async function pollSessions() {
   }
 }
 $('token-btn').onclick = () => {
-  const t = $('token-input').value.trim();
-  if (!t) return;
-  state.token = t;
-  localStorage.setItem('sm_token', t);
+  const id = $('id-input').value.trim();
+  const pw = $('pw-input').value;
+  if (!id || !pw) return;
+  // 서버 자격증명은 "아이디:비밀번호" 합성 문자열 — 기존 Bearer/?token= 경로를 그대로 탄다.
+  state.token = id + ':' + pw;
+  localStorage.setItem('sm_token', state.token);
   enterApp();
 };
-$('token-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('token-btn').click(); });
+$('id-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('pw-input').focus(); });
+$('pw-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('token-btn').click(); });
 $('list-btn').onclick = () => selectSession(null); // 상단바: 목록으로 복귀
 
 // 로그아웃: 저장된 토큰을 지우고 연결을 끊은 뒤 로그인 화면으로.
@@ -132,7 +144,8 @@ $('logout-btn').onclick = () => {
   }
   state.sessions.clear();
   state.selected = null;
-  $('token-input').value = '';
+  $('id-input').value = '';
+  $('pw-input').value = '';
   showGate('');
 };
 
@@ -152,6 +165,19 @@ $('tb-reset').onclick = () => {
 };
 // 위험 모드 ON/OFF 토글(전역): ⋮ 메뉴 항목. 서버에 반영 → danger 이벤트로 모든 기기 동기화.
 $('tb-danger').onclick = () => toggleDanger();
+
+// 서버 재시작. 서버가 스스로 되살아나는 게 아니라 start-server.bat 창(:loop)이 다시 띄운다
+// — 그 감시자가 없으면 서버가 409 로 거부하므로, 눌러서 영영 죽는 사고는 안 난다.
+// 끊긴 뒤 복구는 ws.onclose 의 자동 재연결(1.5초 간격)이 알아서 한다.
+$('tb-restart').onclick = async () => {
+  if (!confirm('컨트롤러 서버를 재시작할까요?\n돌고 있는 세션이 모두 내려갔다가 복원됩니다(10초쯤 걸립니다).')) return;
+  try {
+    await api('POST', '/restart');
+    alert('재시작 중입니다. 서버가 다시 뜨면 자동으로 다시 연결됩니다.');
+  } catch (e) {
+    showErr(e); // 409 = 감시자 없음(이 창은 start-server.bat 로 띄운 게 아님)
+  }
+};
 $('tb-diagnose').onclick = () => {
   const id = state.selected;
   if (id) openDiagnose(id);
@@ -261,7 +287,7 @@ async function api(method, path, body) {
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + state.token },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (res.status === 401) { showGate('토큰이 올바르지 않습니다.'); throw new Error('unauthorized'); }
+  if (res.status === 401) { showGate('아이디 또는 비밀번호가 올바르지 않습니다.'); throw new Error('unauthorized'); }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
@@ -283,7 +309,7 @@ function connect() {
   ws.onclose = (e) => {
     if (state.ws !== ws) return; // 이미 새 소켓으로 교체된 낡은 소켓의 close 는 무시
     $('conn')?.classList.remove('on');
-    if (e.code === 4001) { showGate('토큰이 올바르지 않습니다.'); return; }
+    if (e.code === 4001) { showGate('아이디 또는 비밀번호가 올바르지 않습니다.'); return; }
     setTimeout(() => { if (state.token) connect(); }, 1500); // 자동 재연결
   };
   ws.onmessage = (e) => handleEvent(JSON.parse(e.data));
@@ -307,6 +333,7 @@ function handleEvent(ev) {
     state.notified = state.notified.filter((id) => state.sessions.has(id)); // 재연결 시 큐 정리
     if (typeof ev.danger === 'boolean') state.danger = ev.danger; // 위험 모드 현재값 동기화
     if (ev.aux) { state.aux = ev.aux; renderAux(); } // 보조 서버 현재값 동기화
+    state.restricted = !!ev.restricted; // 샌드박스 계정: 서버 현황/위험모드 등 관리 UI 숨김
   } else if (ev.type === 'danger') {
     state.danger = ev.danger; // 다른 기기에서 토글한 결과 동기화
   } else if (ev.type === 'aux') {
@@ -381,19 +408,24 @@ function render() {
   const logPrevTop = oldLog ? oldLog.scrollTop : 0;
   const logNearBottom = oldLog ? oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 60 : true;
 
-  // 폰 마스터-디테일: 유효한 세션(또는 서버 현황 페이지)이 선택됐을 때만 상세 화면을 보인다
+  // 폰 마스터-디테일: 유효한 세션(또는 서버 현황 페이지/파일 탭)이 선택됐을 때만 상세 화면을 보인다
   const isServers = state.selected === SERVERS_ID;
   const hasSel = isServers || (state.selected != null && state.sessions.has(state.selected));
-  document.body.classList.toggle('viewing', hasSel);
+  const fileView = !!state.openFile;
+  document.body.classList.toggle('viewing', hasSel || fileView);
   // 상단 세션 동작 버튼(중단/리셋/종료)은 실제 세션을 볼 때만 노출(서버 현황 페이지에선 숨김)
   document.querySelectorAll('.tb-sess').forEach((b) => b.classList.toggle('hidden', !hasSel || isServers));
   // 위험 모드 상태를 ⋮ 메뉴 항목에 반영(다른 기기 토글로도 바뀔 수 있어 매 렌더마다).
   const dgItem = $('tb-danger');
   if (dgItem) {
     dgItem.classList.toggle('danger-on', state.danger);
+    dgItem.classList.toggle('hidden', state.restricted); // 전역 설정 — 샌드박스 계정에겐 숨김
     const hint = $('tb-danger-hint');
     if (hint) hint.textContent = state.danger ? 'ON — 자동 실행 중' : 'OFF — 매번 확인';
   }
+  // 보조 서버(LAN 전용)도 샌드박스 계정에겐 의미 없고 전역 자원이라 숨긴다
+  $('aux-btn')?.classList.toggle('hidden', state.restricted);
+  $('tb-restart')?.classList.toggle('hidden', state.restricted); // 서버 전체 재기동 — 샌드박스 계정에겐 숨김
   renderList();
   renderDetail();
 
@@ -416,21 +448,29 @@ function renderList() {
   const sessions = latestPerFolder([...state.sessions.values()]).sort(byImportance);
   list.innerHTML = '';
 
-  // 목록 맨 위 고정: "서버 현황" — 로컬에서 돌고 있는 서버들의 실행 상태 페이지(세션 아님)
-  const srv = document.createElement('div');
-  srv.className = 'item srv-nav' + (state.selected === SERVERS_ID ? ' active' : '');
-  srv.onclick = () => selectSession(SERVERS_ID);
-  srv.innerHTML = `
-    <div class="row">
-      <span class="title">🖥️ 서버 현황</span>
-    </div>
-    <div class="cwd">로컬에서 돌고 있는 서버</div>`;
-  list.appendChild(srv);
+  // 목록 맨 위 고정: "서버 현황" — 로컬에서 돌고 있는 서버들의 실행 상태 페이지(세션 아님).
+  // 샌드박스 계정(동료)에게는 숨긴다 — PC 전체 정보/프로세스 종료는 관리자 전용(API 도 403).
+  if (!state.restricted) {
+    const srv = document.createElement('div');
+    srv.className = 'item srv-nav' + (state.selected === SERVERS_ID ? ' active' : '');
+    srv.onclick = () => selectSession(SERVERS_ID);
+    srv.innerHTML = `
+      <div class="row">
+        <span class="title">🖥️ 서버 현황</span>
+      </div>
+      <div class="cwd">로컬에서 돌고 있는 서버</div>`;
+    list.appendChild(srv);
+  } else if (state.selected === SERVERS_ID) {
+    // 혹시 열린 채로 제한이 내려오면 빈 화면으로 되돌린다
+    state.selected = null;
+  }
 
   for (const s of sessions) {
     const el = document.createElement('div');
     el.className = 'item' + (s.id === state.selected ? ' active' : '');
     el.onclick = () => selectSession(s.id);
+    // 더블클릭: 이 세션의 작업 폴더를 파일 탭으로 바로 연다
+    el.ondblclick = () => { selectSession(s.id); setSideTab('files'); };
     // 승인 대기면 목록에서 바로 허가/거부
     const perm = s.pending
       ? `<div class="list-perm">
@@ -518,7 +558,15 @@ function buildDetailShell(detail, s) {
   // 골격은 세션당 한 번만 만들므로 이 input 리스너도 한 번만 연결된다(중복 누적 없음).
   const prompt = $('prompt');
   prompt.value = state.drafts.get(s.id) || '';
-  prompt.addEventListener('input', () => state.drafts.set(s.id, prompt.value));
+  // 자동 높이: 내용에 맞춰 늘어나 스크롤바가 생기지 않는다(최대 높이는 CSS max-height).
+  const autoGrow = () => {
+    prompt.style.height = 'auto';
+    const h = Math.min(prompt.scrollHeight, 220);
+    prompt.style.height = h + 'px';
+    prompt.classList.toggle('overgrow', prompt.scrollHeight > 220); // 한계 초과 시에만 내부 스크롤
+  };
+  prompt.addEventListener('input', () => { state.drafts.set(s.id, prompt.value); autoGrow(); });
+  if (prompt.value) autoGrow(); // 복원된 초안에도 맞춤
 
   // 첨부 이미지 미리보기/추가/삭제 (인라인)
   renderThumbs(s.id);
@@ -645,6 +693,57 @@ function updateDetailDynamic(s) {
     log.appendChild(el);
   }
 
+  // 작업 중이면 로그 맨 아래에 CLI 스타일 스피너(✻ 궁리하는 중…)를 붙인다.
+  // 주의: 이 단어들은 SDK 가 주는 게 아니라 CLI 처럼 프런트가 뽑는 장식 문구다.
+  if (s.status === 'thinking' || s.status === 'starting') {
+    const line = document.createElement('div');
+    line.className = 'spin-line';
+    line.innerHTML = `<span class="spin-star">✻</span><span class="spin-word"></span><span class="spin-elapsed"></span>`;
+    log.appendChild(line);
+    tickSpinner(line, s);
+    startSpinnerTimer();
+  }
+}
+
+// ---------- 작업중 스피너 ----------
+// 기본: vocab.js 의 SPIN_VOCAB(고급 영어 어휘+뜻)을 8초마다 돌려 보여줌 — 기다리는 동안 단어 공부.
+// vocab.js 로드 실패 시 아래 한국어 장식 문구로 폴백.
+const SPIN_WORDS = [
+  '궁리하는 중', '골똘히 생각하는 중', '계획을 꾸미는 중', '코드를 읽는 중',
+  '뚝딱거리는 중', '조사하는 중', '머리를 굴리는 중', '실마리를 찾는 중',
+  '요모조모 살피는 중', '가닥을 잡는 중', '두드려 보는 중', '차근차근 짚는 중',
+];
+// 세션마다 단어 순서가 달라지게 하는 간단한 해시(장식용이라 충돌 무관).
+function spinHash(id) {
+  let h = 0;
+  for (const ch of String(id)) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return Math.abs(h);
+}
+// 스피너 한 틱: 어휘(8초마다 교체)와 경과 시간(마지막 스트림 활동 이후)을 갱신.
+// 단어 인덱스는 벽시계 기준 — updatedAt 기준으로 하면 스트림이 흐르는 동안 계속 0으로
+// 리셋돼 첫 단어만 나온다(실제로 그랬다). 경과 시간 표시는 침묵 감지용이라 그대로 둔다.
+function tickSpinner(line, s) {
+  const sec = Math.max(0, Math.floor((Date.now() - new Date(s.updatedAt).getTime()) / 1000));
+  const el = line.querySelector('.spin-word');
+  const idx = spinHash(s.id) + Math.floor(Date.now() / 8000);
+  if (typeof SPIN_VOCAB !== 'undefined' && SPIN_VOCAB.length) {
+    const [w, m] = SPIN_VOCAB[idx % SPIN_VOCAB.length];
+    el.innerHTML = `<b class="spin-en">${w}</b> — ${m}`;   // 우리 정적 목록이라 escape 불필요
+  } else {
+    el.textContent = SPIN_WORDS[idx % SPIN_WORDS.length] + '…';
+  }
+  line.querySelector('.spin-elapsed').textContent = sec >= 5 ? `(${sec}초)` : '';
+}
+// 재렌더 없이도 시간이 흐르게 1초 타이머로 스피너만 갱신. 스피너가 사라지면 스스로 멈춘다.
+let spinTimer = null;
+function startSpinnerTimer() {
+  if (spinTimer) return;
+  spinTimer = setInterval(() => {
+    const line = document.querySelector('#log .spin-line');
+    const s = state.selected ? state.sessions.get(state.selected) : null;
+    if (!line || !s) { clearInterval(spinTimer); spinTimer = null; return; }
+    tickSpinner(line, s);
+  }, 1000);
 }
 
 // 빠른 실행: 입력창을 거치지 않고 즉시 프롬프트를 전송한다 (폰에서 한 번 탭).
@@ -1117,6 +1216,318 @@ $('aux-pick').onclick = () => {
   $('aux-modal').classList.add('hidden'); // 피커 모달과 겹치지 않게 잠시 숨김
   openFolderPicker((dir) => { $('aux-dir').value = dir; $('aux-modal').classList.remove('hidden'); renderAux(); });
 };
+
+// ---------- 파일 탐색기(사이드 탭) + 파일 탭 패널 ----------
+// VS Code 식: 사이드바 [세션|파일] 탭에서 파일을 고르면 대화 화면 옆 탭(패널)으로
+// 내용이 열린다. 코드는 텍스트로, 이미지/영상/음성은 브라우저에서 재생, 전부 다운로드 가능.
+const TEXT_EXT = new Set(['txt','md','markdown','js','mjs','cjs','ts','tsx','jsx','json','css','html','htm','py','ps1','psm1','bat','cmd','sh','yml','yaml','toml','ini','cfg','conf','log','csv','tsv','xml','sql','java','c','h','cpp','hpp','cs','go','rs','rb','php','ahk','vb','env','example','gitignore','lock']);
+const IMG_EXT = new Set(['png','jpg','jpeg','gif','webp','svg','bmp','ico','avif']);
+// 오피스 문서 — 서버가 LibreOffice 로 PDF 변환해 보여준다 (src/convert.ts 의 CONVERTIBLE_EXT 와 짝)
+const OFFICE_EXT = new Set(['pptx','ppt','odp','docx','doc','odt','rtf','xlsx','xls','ods']);
+const VID_EXT = new Set(['mp4','webm','mov','m4v']);
+const AUD_EXT = new Set(['mp3','wav','ogg','m4a','flac','aac']);
+
+function extOf(name) { const i = name.lastIndexOf('.'); return i >= 0 ? name.slice(i + 1).toLowerCase() : ''; }
+// <img>/<video> 는 Authorization 헤더를 못 보내므로 토큰을 쿼리로 싣는다(서버가 ?token= 허용).
+function fileUrl(path, download) {
+  return '/api/file?path=' + encodeURIComponent(path) + '&token=' + encodeURIComponent(state.token) + (download ? '&download=1' : '');
+}
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+// --- 사이드바 탭 전환 ---
+// 파일 트리는 "지금 선택된 세션의 작업 폴더"를 뿌리로 연다. 같은 세션 안에서 폴더를
+// 옮겨 다닌 위치(fileDir)는 유지하되, 다른 세션으로 바뀌면 그 세션의 cwd 로 다시 연다.
+// 세션이 선택돼 있으면 그 cwd 가 트리의 하한 — 각 프로젝트는 자기 폴더만 보이고
+// 상위(다른 프로젝트들)로는 못 올라간다. (세션 미선택 시엔 계정 루트 기준)
+function treeRoot() {
+  const s = state.selected ? state.sessions.get(state.selected) : null;
+  return s?.cwd || null;
+}
+function normPath(p) { return (p || '').replace(/[\\/]+$/, '').toLowerCase(); }
+function underTreeRoot(p) {
+  const r = treeRoot();
+  if (!r) return true;
+  const np = normPath(p), nr = normPath(r);
+  return np === nr || np.startsWith(nr + '\\') || np.startsWith(nr + '/');
+}
+async function loadTreeForCurrent() {
+  const s = state.selected ? state.sessions.get(state.selected) : null;
+  const changed = state.fileTreeFor !== state.selected;
+  state.fileTreeFor = state.selected;
+  let start = !changed && state.fileDir ? state.fileDir : '';
+  if (start && !underTreeRoot(start)) start = ''; // 이전에 프로젝트 밖을 보고 있었으면 cwd 로 재루트
+  if (!start) start = s?.cwd || (await getStartDir());
+  loadTree(start);
+}
+function setSideTab(tab) {
+  state.sideTab = tab;
+  $('side-tab-sessions').classList.toggle('on', tab === 'sessions');
+  $('side-tab-files').classList.toggle('on', tab === 'files');
+  $('list').classList.toggle('hidden', tab !== 'sessions');
+  $('file-tree').classList.toggle('hidden', tab !== 'files');
+  if (tab === 'files') void loadTreeForCurrent();
+}
+$('side-tab-sessions').onclick = () => setSideTab('sessions');
+$('side-tab-files').onclick = () => setSideTab('files');
+$('files-btn').onclick = () => setSideTab('files');
+
+// --- 파일 트리(사이드바) ---
+// VS Code 식 트리: 폴더를 클릭하면 바로 아래에 들여쓰기로 펼쳐지고, 다시 클릭하면 접힌다.
+// 펼친 폴더 목록(expanded)은 유지돼 세션 전환 후 돌아와도 상태가 남는다.
+function treeDirRow(container, dirPath, depth) {
+  const name = dirPath.split(/[\\/]/).filter(Boolean).pop() || dirPath;
+  const row = document.createElement('div');
+  row.className = 'tree-row dir';
+  row.style.paddingLeft = 10 + depth * 14 + 'px';
+  const isOpen = state.treeOpen.has(dirPath);
+  row.innerHTML = `<span class="tree-name" title="${esc(dirPath)}"><span class="tree-arrow">${isOpen ? '▾' : '▸'}</span> 📁 ${esc(name)}</span>`;
+  const kids = document.createElement('div'); // 자식들이 렌더될 컨테이너(접으면 비움)
+  row.onclick = async () => {
+    const arrow = row.querySelector('.tree-arrow');
+    if (state.treeOpen.has(dirPath)) {
+      state.treeOpen.delete(dirPath);
+      kids.innerHTML = '';
+      arrow.textContent = '▸';
+    } else {
+      state.treeOpen.add(dirPath);
+      arrow.textContent = '▾';
+      await renderTreeChildren(kids, dirPath, depth + 1);
+    }
+  };
+  container.appendChild(row);
+  container.appendChild(kids);
+  if (isOpen) void renderTreeChildren(kids, dirPath, depth + 1);
+}
+function treeFileRow(container, f, depth) {
+  const row = document.createElement('div');
+  row.className = 'tree-row file' + (state.openFile && state.openFile.path === f.path ? ' active' : '');
+  row.style.paddingLeft = 10 + depth * 14 + 'px';
+  row.innerHTML = `<span class="tree-name" title="${esc(f.path)}">📄 ${esc(f.name)}</span><span class="file-size">${fmtSize(f.size)}</span>`;
+  row.onclick = () => openFileTab(f);
+  container.appendChild(row);
+}
+async function renderTreeChildren(container, path, depth) {
+  try {
+    const b = await api('GET', '/files?path=' + encodeURIComponent(path || ''));
+    container.innerHTML = '';
+    for (const d of b.dirs) treeDirRow(container, d, depth);
+    for (const f of (b.files || [])) treeFileRow(container, f, depth);
+    if (b.error) {
+      const e = document.createElement('div');
+      e.className = 'tree-row';
+      e.style.paddingLeft = 10 + depth * 14 + 'px';
+      e.textContent = '열 수 없음: ' + b.error;
+      container.appendChild(e);
+    }
+  } catch (e) {
+    container.innerHTML = `<div class="tree-row">오류: ${esc(e.message)}</div>`;
+  }
+}
+async function loadTree(path) {
+  const tree = $('file-tree');
+  // 세션 프로젝트 폴더 밖(또는 빈 경로)은 전부 cwd 로 스냅 — 상위 프로젝트 목록이 안 보이게
+  const lower = treeRoot();
+  if (lower && !underTreeRoot(path)) path = lower;
+  try {
+    const b = await api('GET', '/files?path=' + encodeURIComponent(path || ''));
+    state.fileDir = b.isRoot ? '' : b.path;
+    tree.innerHTML = '';
+    const here = document.createElement('div');
+    here.className = 'tree-here';
+    here.textContent = b.isRoot ? '드라이브 선택' : b.path;
+    here.title = b.path || '';
+    tree.appendChild(here);
+    if (b.parent !== null && (!lower || (underTreeRoot(b.parent) && normPath(b.path) !== normPath(lower)))) {
+      const up = document.createElement('div');
+      up.className = 'tree-row up';
+      up.textContent = '⬆ 상위로';
+      up.onclick = () => loadTree(b.parent);
+      tree.appendChild(up);
+    }
+    const body = document.createElement('div');
+    tree.appendChild(body);
+    for (const d of b.dirs) treeDirRow(body, d, 0);
+    for (const f of (b.files || [])) treeFileRow(body, f, 0);
+    if (b.error) { const e = document.createElement('div'); e.className = 'tree-row'; e.textContent = '열 수 없음: ' + b.error; body.appendChild(e); }
+  } catch (e) {
+    tree.innerHTML = `<div class="tree-row">오류: ${esc(e.message)}</div>`;
+  }
+}
+
+// --- 파일 패널(대화 옆 분할 화면) ---
+// 대화와 파일 내용을 나란히 띄우고, 가운데 구분선(splitter) 드래그로 폭을 조절한다.
+function updatePaneVisibility() {
+  const open = !!state.openFile;
+  $('splitter').classList.toggle('hidden', !open);
+  $('file-pane').classList.toggle('hidden', !open);
+  if (open) {
+    const saved = parseInt(localStorage.getItem('sm_filew') || '', 10);
+    $('file-pane').style.width =
+      (saved > 200 ? saved : Math.max(300, Math.round(window.innerWidth * 0.42))) + 'px';
+  }
+}
+function closeFileTab() {
+  state.openFile = null;
+  updatePaneVisibility();
+  render();
+}
+
+function openFileTab(f) {
+  state.openFile = f;
+  updatePaneVisibility();
+  renderFilePane(f);
+  // 트리에서 열린 파일 강조 갱신
+  document.querySelectorAll('#file-tree .tree-row.file').forEach((r) => {
+    r.classList.toggle('active', r.querySelector('.tree-name')?.title === f.path);
+  });
+  render(); // 모바일 마스터-디테일(viewing) 갱신
+}
+
+// 구분선 드래그 — pointer capture 를 써서 iframe(PDF) 위로 지나가도 이벤트를 놓치지 않는다.
+// onMove 는 포인터 x 좌표를 받아 폭을 적용한다.
+function attachSplitter(sp, onMove) {
+  let dragging = false;
+  sp.addEventListener('pointerdown', (e) => {
+    dragging = true;
+    sp.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  sp.addEventListener('pointermove', (e) => { if (dragging) onMove(e.clientX); });
+  sp.addEventListener('pointerup', () => { dragging = false; });
+}
+// 파일 패널(오른쪽) 폭
+attachSplitter($('splitter'), (x) => {
+  const col = $('splitter').parentElement.getBoundingClientRect();
+  const w = Math.max(260, Math.min(col.right - x, col.width - 320)); // 양쪽 최소 폭 보장
+  $('file-pane').style.width = w + 'px';
+  localStorage.setItem('sm_filew', String(w));
+});
+// 사이드바(왼쪽) 폭
+attachSplitter($('side-splitter'), (x) => {
+  const layout = $('side').parentElement.getBoundingClientRect();
+  const w = Math.max(170, Math.min(x - layout.left, Math.round(layout.width * 0.6)));
+  $('side').style.width = w + 'px';
+  localStorage.setItem('sm_sidew', String(w));
+});
+// 저장된 사이드바 폭 복원
+{
+  const saved = parseInt(localStorage.getItem('sm_sidew') || '', 10);
+  if (saved >= 170) $('side').style.width = saved + 'px';
+}
+
+function renderFilePane(f) {
+  const pane = $('file-pane');
+  pane.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'file-pane-head';
+  head.innerHTML = `<span class="file-pane-title" title="${esc(f.path)}">📄 ${esc(f.name)}</span>`;
+  const dl = document.createElement('button');
+  dl.className = 'ghost';
+  dl.textContent = '⬇';
+  dl.title = '다운로드';
+  dl.onclick = () => {
+    const a = document.createElement('a');
+    a.href = fileUrl(f.path, true);
+    a.download = f.name;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  head.appendChild(dl);
+  const x = document.createElement('button');
+  x.className = 'ghost';
+  x.textContent = '✕';
+  x.title = '파일 패널 닫기';
+  x.onclick = closeFileTab;
+  head.appendChild(x);
+  pane.appendChild(head);
+  const pathBar = document.createElement('div');
+  pathBar.className = 'file-pane-pathbar';
+  pathBar.textContent = f.path;
+  pathBar.title = f.path;
+  pane.appendChild(pathBar);
+  const body = document.createElement('div');
+  body.className = 'file-pane-body';
+  pane.appendChild(body);
+
+  const ext = extOf(f.name);
+  const url = fileUrl(f.path);
+  if (IMG_EXT.has(ext)) { const img = new Image(); img.className = 'viewer-media'; img.src = url; body.appendChild(img); return; }
+  if (VID_EXT.has(ext)) { const v = document.createElement('video'); v.controls = true; v.className = 'viewer-media'; v.src = url; body.appendChild(v); return; }
+  if (AUD_EXT.has(ext)) { const a = document.createElement('audio'); a.controls = true; a.src = url; a.style.width = '100%'; body.appendChild(a); return; }
+  if (ext === 'pdf') { const fr = document.createElement('iframe'); fr.className = 'viewer-frame'; fr.src = url; body.appendChild(fr); return; }
+  // 오피스 문서 — 서버가 PDF 로 변환해 준다. 첫 변환은 수 초 걸리므로 진행 표시 후 교체.
+  if (OFFICE_EXT.has(ext)) {
+    const msg = document.createElement('div');
+    msg.className = 'viewer-converting';
+    msg.textContent = '📄 PDF로 변환 중… (첫 열람은 수 초 걸립니다)';
+    body.appendChild(msg);
+    const pvUrl = '/api/preview?path=' + encodeURIComponent(f.path) + '&token=' + encodeURIComponent(state.token);
+    fetch(pvUrl)
+      .then(async (r) => {
+        if (!r.ok) {
+          let detail = 'HTTP ' + r.status;
+          try { detail = (await r.json()).error || detail; } catch { /* JSON 아님 */ }
+          throw new Error(detail);
+        }
+        return r.blob();
+      })
+      .then((blob) => {
+        if (state.openFile?.path !== f.path) return; // 기다리는 동안 다른 파일을 열었으면 무시
+        const fr = document.createElement('iframe');
+        fr.className = 'viewer-frame';
+        fr.src = URL.createObjectURL(blob);
+        body.innerHTML = '';
+        body.appendChild(fr);
+        // pptx 는 PDF 가 영상을 정지 포스터로만 보여준다 — 내장 영상을 추출해 아래에 재생 가능하게 붙인다
+        if (ext === 'pptx') {
+          fetch('/api/preview-media?path=' + encodeURIComponent(f.path) + '&token=' + encodeURIComponent(state.token))
+            .then((r) => (r.ok ? r.json() : { videos: [] }))
+            .then(({ videos }) => {
+              if (!videos?.length || state.openFile?.path !== f.path) return;
+              const sec = document.createElement('div');
+              sec.className = 'viewer-videos';
+              sec.innerHTML = `<div class="viewer-videos-title">🎬 슬라이드 영상 ${videos.length}개 (PDF에선 정지화면)</div>`;
+              for (const v of videos) {
+                const card = document.createElement('div');
+                card.className = 'viewer-video-card';
+                const label = document.createElement('div');
+                label.className = 'viewer-video-label';
+                label.textContent = `슬라이드 ${v.slide}`;
+                const vid = document.createElement('video');
+                vid.controls = true;
+                vid.playsInline = true;
+                vid.preload = 'metadata';
+                vid.src = '/api/preview-media/file?path=' + encodeURIComponent(f.path) +
+                  '&name=' + encodeURIComponent(v.name) + '&token=' + encodeURIComponent(state.token);
+                card.appendChild(label); card.appendChild(vid);
+                sec.appendChild(card);
+              }
+              body.appendChild(sec);
+            })
+            .catch(() => { /* 영상 추출 실패는 치명적이지 않음 — PDF 만 보여준다 */ });
+        }
+      })
+      .catch((e) => { msg.textContent = '변환 실패: ' + e.message + ' — ⬇ 다운로드로 여세요.'; });
+    return;
+  }
+  // 코드/텍스트 — 알려진 텍스트 확장자, 또는 모르는 확장자라도 512KB 이하면 텍스트로 시도
+  if (TEXT_EXT.has(ext) || f.size <= 512 * 1024) {
+    if (f.size > 2 * 1024 * 1024) { body.textContent = '텍스트가 너무 큽니다(2MB 초과). ⬇ 다운로드로 여세요.'; return; }
+    const pre = document.createElement('pre');
+    pre.className = 'viewer-code';
+    pre.textContent = '불러오는 중…';
+    body.appendChild(pre);
+    fetch(url).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then((t) => { pre.textContent = t; })
+      .catch((e) => { pre.textContent = '열 수 없음: ' + e.message; });
+    return;
+  }
+  body.textContent = '미리보기를 지원하지 않는 형식입니다. ⬇ 다운로드로 여세요.';
+}
 $('aux-static-start').onclick = () => auxAction('static', 'start');
 $('aux-static-stop').onclick = () => auxAction('static', 'stop');
 $('aux-upload-start').onclick = () => auxAction('upload', 'start');

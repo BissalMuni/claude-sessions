@@ -249,7 +249,9 @@ input, textarea {
 /* 입력바 */
 .composer { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--line); background: var(--panel); }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
-.composer textarea { resize: none; height: 44px; max-height: 140px; }
+/* 자동 높이(app.js autoGrow)로 늘어나므로 스크롤바를 숨긴다 — 220px 넘으면 그때만 내부 스크롤 */
+.composer textarea { resize: none; height: 44px; max-height: 220px; overflow-y: hidden; }
+.composer textarea.overgrow { overflow-y: auto; }
 .composer button { flex: none; }
 .attach-btn { height: 44px; font-size: 21.6px; line-height: 1; padding: 0 12px; }
 
@@ -302,12 +304,13 @@ input, textarea {
 @media (max-width: 640px) {
   /* 목록과 상세를 나란히 두지 않고 한 화면씩 전환(마스터-디테일) */
   .list {
-    width: 100%;
+    width: 100% !important; /* 드래그로 저장된 인라인 폭(PC용)을 무시 */
     border-right: none;
   }
-  .detail { display: none; }            /* 기본: 목록만 보임 */
-  body.viewing .list { display: none; } /* 세션 선택 시: 상세만 보임 */
-  body.viewing .detail { display: flex; }
+  .splitter { display: none; } /* 폰에선 분할/드래그 없음 */
+  .main-col { display: none; }          /* 기본: 목록만 보임 */
+  body.viewing .list { display: none; } /* 세션/파일 선택 시: 상세만 보임 */
+  body.viewing .main-col { display: flex; }
   .back-btn { display: inline-block; }  /* 상세에서 목록으로 돌아가는 버튼 */
 
   /* 관리버튼들은 균등(flex:1)·축소(min-width:0)라 한 줄에 들어감 → 줄바꿈 금지 */
@@ -368,6 +371,16 @@ button.ghost.danger:disabled { opacity: .4; }
 .mem-tag.self { background: rgba(34,197,94,.18); color: var(--green); }
 .mem-tag.lock { background: var(--line); color: var(--muted); }
 
+/* 작업중 스피너: CLI 의 "✻ Scheming..." 처럼 로그 맨 아래에서 살아있음을 보여준다 */
+.spin-line { display: flex; align-items: center; gap: 8px; padding: 10px 4px 4px; color: var(--muted); font-size: 14.5px; }
+.spin-star { color: #e6704b; animation: spin-pulse 1.2s ease-in-out infinite; display: inline-block; }
+.spin-elapsed { font-size: 12.5px; font-variant-numeric: tabular-nums; opacity: .7; }
+.spin-en { color: #e6704b; font-weight: 700; }   /* 스피너 영단어 강조 */
+@keyframes spin-pulse {
+  0%, 100% { opacity: .35; transform: scale(.85) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1.15) rotate(90deg); }
+}
+
 /* 앱 프로세스: 앱별 그룹 헤더(전체선택 체크박스 + 개수·합계). 행은 .mem-row 를 재사용. */
 .app-grp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 4px 4px; margin-top: 4px; }
 .app-grp-sel { display: flex; align-items: center; gap: 8px; cursor: pointer; }
@@ -400,3 +413,86 @@ button.ghost.danger:disabled { opacity: .4; }
 .diag-act-compact { border-color: var(--green); color: var(--green); }
 .diag-act-interrupt { border-color: var(--amber); color: var(--amber); }
 .diag-act-note { font-weight: 400; font-size: 12.5px; color: var(--muted); }
+
+/* ---------- 파일 탐색기 + 뷰어 ---------- */
+.file-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.file-size { color: var(--muted); font-size: 13px; flex: none; }
+.viewer-box { max-width: 900px; width: 96vw; max-height: 92vh; overflow-y: auto; }
+.viewer-name { font-size: 16px; word-break: break-all; }
+.viewer-body { min-height: 120px; }
+.viewer-media { max-width: 100%; max-height: 70vh; display: block; margin: 0 auto; border-radius: 8px; }
+.viewer-frame { width: 100%; height: 72vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.viewer-converting { color: var(--muted); padding: 24px 12px; text-align: center; font-size: 14px; }
+.viewer-videos { margin-top: 14px; }
+.viewer-videos-title { font-size: 14px; font-weight: 700; margin-bottom: 10px; color: var(--fg); }
+.viewer-video-card { margin-bottom: 16px; }
+.viewer-video-label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.viewer-video-card video { width: 100%; border-radius: 8px; background: #000; }
+.viewer-code {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px; margin: 0; overflow: auto; max-height: 70vh;
+  font-family: Consolas, "D2Coding", monospace; font-size: 13px; line-height: 1.5;
+  white-space: pre; tab-size: 2;
+}
+
+/* ---------- 사이드바 탭(세션|파일) + 파일 트리 + 파일 탭 패널 ---------- */
+.side-tabs { display: flex; gap: 2px; padding: 6px 6px 0; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; }
+.side-tab {
+  flex: 1; padding: 7px 4px; font-size: 13px; text-align: center; cursor: pointer;
+  background: transparent; border: none; color: var(--muted);
+  border-bottom: 2px solid transparent;
+}
+.side-tab.on { color: var(--fg, #e6e9f0); border-bottom-color: var(--green, #3fb950); font-weight: 600; }
+
+.tree-here { padding: 7px 10px; font-size: 12px; color: var(--muted); background: var(--panel2); border-bottom: 1px solid var(--line); word-break: break-all; }
+.tree-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 7px 10px; font-size: 13.5px; cursor: pointer; border-bottom: 1px solid var(--line);
+}
+.tree-row:hover { background: var(--panel2); }
+.tree-row.up { color: var(--muted); }
+.tree-row.file.active { background: var(--panel2); box-shadow: inset 2px 0 0 var(--green, #3fb950); }
+.tree-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* min-height:0 필수 — 없으면 flex 자식이 줄어들지 못해 본문이 화면을 뚫고 자라
+   페이지 전체가 스크롤된다(대화 로그의 내부 스크롤이 죽는 원인). */
+/* 가로 분할: [대화(.detail) | 구분선(.splitter) | 파일(.file-pane)] */
+.main-col { flex: 1; display: flex; flex-direction: row; min-width: 0; min-height: 0; }
+.splitter { width: 6px; flex: none; cursor: col-resize; background: var(--line); touch-action: none; }
+.splitter:hover, .splitter:active { background: var(--accent); }
+.pane-tabs { display: flex; gap: 4px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); background: var(--panel); flex: none; }
+.pane-tab {
+  padding: 6px 12px; font-size: 13px; cursor: pointer;
+  border: 1px solid var(--line); border-bottom: none; border-radius: 8px 8px 0 0;
+  background: var(--panel2); color: var(--muted); display: flex; gap: 6px; align-items: center;
+}
+.pane-tab.on { background: var(--bg, #0b0e14); color: var(--fg, #e6e9f0); font-weight: 600; }
+.pane-tab .x { opacity: .6; padding: 0 2px; }
+.pane-tab .x:hover { opacity: 1; color: var(--red, #f85149); }
+
+/* 파일 패널: 오른쪽 분할 — 폭은 JS(스플리터 드래그)가 지정, 세로는 내부 본문만 스크롤 */
+.file-pane {
+  flex: none; width: 42vw; display: flex; flex-direction: column;
+  min-width: 260px; min-height: 0; border-left: 1px solid var(--line); background: var(--bg);
+}
+.file-pane-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--panel); flex: none;
+}
+.file-pane-title { flex: 1; font-weight: 600; font-size: 14px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-pane-head button { padding: 4px 10px; flex: none; }
+.file-pane-pathbar {
+  flex: none; padding: 5px 12px; color: var(--muted); font-size: 12px;
+  border-bottom: 1px solid var(--line); background: var(--panel2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.file-pane-body { flex: 1; overflow: auto; padding: 12px; min-height: 0; }
+.file-pane-body .viewer-code { max-height: none; }
+.file-pane-body .viewer-media { max-height: none; }
+.file-pane-body .viewer-frame { height: 100%; min-height: 60vh; }
+
+/* 트리 펼침 화살표 */
+.tree-arrow { display: inline-block; width: 12px; color: var(--muted); font-size: 11px; }
+.tree-row.dir { border-bottom: none; }
+.tree-row.file { border-bottom: none; }
+.tree-row.up { border-bottom: none; }

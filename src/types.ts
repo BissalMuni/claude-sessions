@@ -160,7 +160,7 @@ export interface AuxStatus {
 
 /** WebSocket 으로 서버 → 폰 푸시되는 이벤트 */
 export type ServerEvent =
-  | { type: 'snapshot'; sessions: SessionView[]; danger: boolean; aux: AuxStatus } // 접속 직후 전체(+위험 모드+보조 서버)
+  | { type: 'snapshot'; sessions: SessionView[]; danger: boolean; aux: AuxStatus; restricted?: boolean } // 접속 직후 전체(+위험 모드+보조 서버+샌드박스 계정 여부)
   | { type: 'session_update'; session: SessionView } // 세션 변경
   | { type: 'session_removed'; sessionId: string }
   | { type: 'danger'; danger: boolean } // 위험 모드 토글 (모든 기기 동기화)
