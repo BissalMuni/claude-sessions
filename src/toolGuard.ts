@@ -14,11 +14,13 @@ import { isWithinRoot } from './browse.js';
 const PATH_KEYS = ['file_path', 'notebook_path', 'path'];
 
 // 루트 밖이어도 항상 허용하는 경로들.
-// - 하네스(Claude Code)가 백그라운드 작업 출력을 쓰는 temp/claude 디렉터리:
-//   run_in_background 로그를 세션이 스스로 읽으려면 필요하다.
+// - 하네스(Claude Code)가 백그라운드 작업 출력·스크래치패드를 쓰는 temp/claude/<프로젝트슬러그>:
+//   run_in_background 로그를 세션이 스스로 읽으려면 필요하다. temp/claude 전체를 열면 PC 의
+//   다른 프로젝트 세션들 출력까지 읽히므로, 이 세션 cwd 의 슬러그 폴더로만 좁힌다.
+//   (슬러그 = cwd 의 영숫자 외 문자를 '-' 로 치환 — 하네스와 같은 규칙)
 // - SESSION_ALLOW_PATHS 환경변수(세미콜론 구분)로 더 추가할 수 있다.
-function allowedPaths(): string[] {
-  const list = [join(tmpdir(), 'claude')];
+function allowedPaths(cwd: string): string[] {
+  const list = [join(tmpdir(), 'claude', cwd.replace(/[^a-zA-Z0-9]/g, '-'))];
   const extra = process.env.SESSION_ALLOW_PATHS;
   if (extra) {
     for (const p of extra.split(';')) {
@@ -30,8 +32,8 @@ function allowedPaths(): string[] {
 }
 
 /** target 이 allowlist 중 하나의 서브트리 안이면 true(루트 밖이어도 허용). */
-function isAllowlisted(target: string): boolean {
-  return allowedPaths().some((p) => isWithinRoot(p, target));
+function isAllowlisted(target: string, cwd: string): boolean {
+  return allowedPaths(cwd).some((p) => isWithinRoot(p, target));
 }
 
 // 윈도우 절대경로(C:\... / c:/...) 및 UNC(\\server\...)를 대충 뽑아내는 정규식.
@@ -39,11 +41,11 @@ function isAllowlisted(target: string): boolean {
 const WIN_ABS = /(?:[a-zA-Z]:[\\/]|\\\\)[^\s"'`|&;<>()]*/g;
 
 /** Bash command 문자열에서 루트 밖 절대경로를 찾으면 그 경로, 없으면 null. */
-function offendingBashPath(command: string, root: string): string | null {
+function offendingBashPath(command: string, root: string, cwd: string): string | null {
   const matches = command.match(WIN_ABS);
   if (!matches) return null;
   for (const m of matches) {
-    if (!isWithinRoot(root, m) && !isAllowlisted(m)) return m;
+    if (!isWithinRoot(root, m) && !isAllowlisted(m, cwd)) return m;
   }
   return null;
 }
@@ -56,6 +58,7 @@ export function offendingToolPath(
   toolName: string,
   input: unknown,
   root: string | null,
+  cwd: string,
 ): string | null {
   if (!root) return null;
   const o = (input ?? {}) as Record<string, unknown>;
@@ -63,13 +66,13 @@ export function offendingToolPath(
   // 1) 경로 인자를 직접 갖는 도구들 — 단단히 검사.
   for (const key of PATH_KEYS) {
     const v = o[key];
-    if (typeof v === 'string' && v.trim() && !isWithinRoot(root, v) && !isAllowlisted(v))
+    if (typeof v === 'string' && v.trim() && !isWithinRoot(root, v) && !isAllowlisted(v, cwd))
       return v;
   }
 
   // 2) Bash — command 안의 절대경로만 best-effort 검사.
   if (toolName === 'Bash' && typeof o.command === 'string') {
-    return offendingBashPath(o.command, root);
+    return offendingBashPath(o.command, root, cwd);
   }
 
   return null;

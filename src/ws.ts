@@ -53,7 +53,7 @@ export function attachWebSocket(server: Server, manager: SessionManager): void {
     // (session_removed 는 sessionId 만 있어 경로 판별 불가하지만, 클라가 모르는 id 삭제는 무해하므로 그대로 전달.)
     const unsubscribe = manager.subscribe((event) => {
       if (ws.readyState !== ws.OPEN) return;
-      if (event.type === 'session_update' && !sessionVisibleTo(event.session.cwd, account)) return;
+      if (event.type === 'session_update' && !sessionVisibleTo(event.session, account)) return;
       ws.send(JSON.stringify(event));
     });
 

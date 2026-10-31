@@ -30,9 +30,12 @@ const MAX_MESSAGES = 300; // 폰 메모리 보호: 최근 N개만 유지
 // 기본은 Opus. 하드코딩 기본값을 .env 와 같은 값으로 두는 게 중요하다 — 다르면 .env 가
 // 없거나 늦게 읽힌 상황에서 조용히 다른 모델로 뜬다(실제로 그래서 6일간 Fable 로 돌았다).
 const MODEL = process.env.SCREEN_MODEL || 'claude-opus-5-5';
-// Fable 이 과부하/일시 불가일 때만 대체. SDK 는 매 사용자 턴 시작에 주 모델을 다시
+// 주 모델이 과부하/일시 불가일 때만 대체. SDK 는 매 사용자 턴 시작에 주 모델을 다시
 // 시도하므로, 잠깐의 장애로 세션이 영구히 강등되지는 않는다.
-const FALLBACK_MODEL = process.env.SCREEN_FALLBACK_MODEL || 'claude-opus-5';
+// 주 모델과 같으면 SDK 가 "Fallback model cannot be the same as the main model" 로 던져
+// 모든 세션이 못 뜬다 → 같으면 대체 모델을 아예 넘기지 않는다.
+const FALLBACK_RAW = process.env.SCREEN_FALLBACK_MODEL || 'claude-opus-5';
+const FALLBACK_MODEL = FALLBACK_RAW !== MODEL ? FALLBACK_RAW : undefined;
 
 // 위험 모드는 런타임 토글(dangerMode.ts)로 관리한다. 켜지면 AskUserQuestion(프로젝트
 // 방향 결정)을 제외한 모든 도구를 폰에 묻지 않고 자동 허용한다. 기본은 ON.
@@ -330,7 +333,7 @@ export class Session {
 
           // 폴더 샌드박스: 계정 루트 밖 파일을 건드리는 도구는 위험/안전 모드와 무관하게 차단.
           // (root=null 무제한 계정이면 통과.) 위험 모드 자동 허용보다 먼저 검사해야 뚫리지 않는다.
-          const offending = offendingToolPath(toolName, input, this.root);
+          const offending = offendingToolPath(toolName, input, this.root, this.cwd);
           if (offending) {
             this.addItem('system', `차단됨(루트 밖): ${toolName} → ${offending}`);
             this.setStatus('thinking');
@@ -502,12 +505,15 @@ export class Session {
           const post = meta?.post_tokens != null ? Math.round(meta.post_tokens / 1000) + 'k' : '?';
           const how = meta?.trigger === 'manual' ? '수동' : '자동';
           this.addItem('system', `🗜 컨텍스트 압축됨(${how}): ${pre} → ${post}`);
+          // 압축 전 실측값을 버린다 — 안 버리면 다음 턴 전까지 링이 압축 전 크기를 계속 보여준다
+          this.lastCtxTokens = meta?.post_tokens ?? null;
         } else if (sm.subtype === 'status') {
           // 수동 /compact 경로 신호: 'compacting' 시작 → compact_result(success|failed).
           if (sm.status === 'compacting') {
             this.addItem('system', '🗜 컨텍스트 압축 중…');
           } else if (sm.compact_result === 'success') {
             this.addItem('system', '🗜 컨텍스트 압축 완료');
+            this.lastCtxTokens = null; // 압축 전 실측값 무효화 → SDK totalTokens 로 폴백
           } else if (sm.compact_result === 'failed') {
             this.addItem('system', `🗜 압축 건너뜀: ${String(sm.compact_error ?? '알 수 없음')}`);
           }

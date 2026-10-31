@@ -1,9 +1,9 @@
-import { Router } from 'express';
+import { Router, type Request, type Response } from 'express';
 import { statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { requireToken } from './auth.js';
 import { browse, browseFiles, defaultStartPath, isWithinRoot } from './browse.js';
-import { CONVERTIBLE_EXT, findSoffice, resetSofficeCache, toPdf } from './convert.js';
+import { CONVERTIBLE_EXT, findSoffice, toPdf } from './convert.js';
 import { extractPptxVideos } from './pptxMedia.js';
 import { auxStatus, startAux, stopAux, type AuxKind } from './auxServers.js';
 import { saveUploads } from './uploads.js';
@@ -50,6 +50,32 @@ function statSafe(p: string) {
   }
 }
 
+/**
+ * ?path= 쿼리를 계정 루트 안의 '존재하는 파일' 절대경로로 해석한다.
+ * 실패면 응답(400/403/404)을 이미 보내고 null — 파일 전송 라우트들의 공통 앞단.
+ */
+function fileInRoot(req: Request, res: Response): string | null {
+  const p = typeof req.query.path === 'string' ? req.query.path : '';
+  if (!p) {
+    res.status(400).json({ error: 'path required' });
+    return null;
+  }
+  const abs = resolve(p);
+  if (!isWithinRoot(req.account?.root ?? null, abs)) {
+    res.status(403).json({ error: 'outside root' });
+    return null;
+  }
+  if (!statSafe(abs)?.isFile()) {
+    res.status(404).json({ error: 'not found' });
+    return null;
+  }
+  return abs;
+}
+
+// 브라우저가 문서로 열면 스크립트가 도는 형식들. 같은 오리진으로 그대로 서빙하면
+// 그 안의 스크립트가 localStorage 의 자격증명(아이디:비번)을 읽을 수 있다.
+const ACTIVE_EXT = /\.(html?|xhtml|shtml|svgz?|xml|xsl|mht(ml)?)$/i;
+
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -88,44 +114,25 @@ export function createApiRouter(manager: SessionManager): Router {
   // 파일 전송(브라우저 보기/재생/다운로드) — 계정 루트 안만. sendFile 이
   // MIME 판별과 Range(영상 탐색) 를 처리한다. ?download=1 이면 강제 다운로드.
   router.get('/file', (req, res) => {
-    const p = typeof req.query.path === 'string' ? req.query.path : '';
-    if (!p) return res.status(400).json({ error: 'path required' });
-    const abs = resolve(p);
-    if (!isWithinRoot(req.account?.root ?? null, abs)) {
-      return res.status(403).json({ error: 'outside root' });
-    }
-    let st;
-    try {
-      st = statSync(abs);
-    } catch {
-      return res.status(404).json({ error: 'not found' });
-    }
-    if (!st.isFile()) return res.status(404).json({ error: 'not a file' });
+    const abs = fileInRoot(req, res);
+    if (!abs) return;
     if (req.query.download === '1') return res.download(abs);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // HTML/SVG 등은 sandbox CSP 로 고립(불투명 오리진 + 스크립트 금지) — 직접 링크로 열어도
+    // 자격증명을 못 훔친다. <img src> 로 쓰는 SVG 미리보기는 영향 없다.
+    if (ACTIVE_EXT.test(abs)) res.setHeader('Content-Security-Policy', 'sandbox');
     res.sendFile(abs);
   });
 
   // 오피스 문서 미리보기 — pptx/docx/xlsx 등을 LibreOffice 로 PDF 변환해 보낸다.
   // 캐시 적중이면 즉시, 아니면 수 초 소요. LibreOffice 미설치면 503 (뷰어가 안내 표시).
   router.get('/preview', async (req, res) => {
-    const p = typeof req.query.path === 'string' ? req.query.path : '';
-    if (!p) return res.status(400).json({ error: 'path required' });
-    const abs = resolve(p);
-    if (!isWithinRoot(req.account?.root ?? null, abs)) {
-      return res.status(403).json({ error: 'outside root' });
-    }
-    let st;
-    try {
-      st = statSync(abs);
-    } catch {
-      return res.status(404).json({ error: 'not found' });
-    }
-    if (!st.isFile()) return res.status(404).json({ error: 'not a file' });
+    const abs = fileInRoot(req, res);
+    if (!abs) return;
     const ext = abs.slice(abs.lastIndexOf('.') + 1).toLowerCase();
     if (!CONVERTIBLE_EXT.has(ext)) {
       return res.status(400).json({ error: '변환을 지원하지 않는 형식: ' + ext });
     }
-    resetSofficeCache(); // 설치 직후에도 즉시 인식되도록 매번 재탐색 (existsSync 2회 — 저렴)
     if (!findSoffice()) {
       return res.status(503).json({ error: 'LibreOffice가 설치되어 있지 않습니다' });
     }
@@ -141,7 +148,7 @@ export function createApiRouter(manager: SessionManager): Router {
 
   // pptx 안의 영상 목록 — PDF 미리보기 아래에 재생 가능한 영상을 붙이기 위한 보조.
   // 응답: { videos: [{slide, name}] } (영상 없으면 빈 배열)
-  router.get('/preview-media', (req, res) => {
+  router.get('/preview-media', async (req, res) => {
     const p = typeof req.query.path === 'string' ? req.query.path : '';
     if (!p) return res.status(400).json({ error: 'path required' });
     const abs = resolve(p);
@@ -152,7 +159,7 @@ export function createApiRouter(manager: SessionManager): Router {
       return res.json({ videos: [] }); // pptx 외 형식/없는 파일은 조용히 빈 목록
     }
     try {
-      res.json({ videos: extractPptxVideos(abs).videos });
+      res.json({ videos: (await extractPptxVideos(abs)).videos });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }
@@ -160,17 +167,13 @@ export function createApiRouter(manager: SessionManager): Router {
 
   // pptx 추출 영상 파일 전송 — name 은 추출 캐시 폴더 안 파일명만 허용(경로 탈출 차단).
   // sendFile 이 Range(모바일 영상 탐색)를 처리한다.
-  router.get('/preview-media/file', (req, res) => {
-    const p = typeof req.query.path === 'string' ? req.query.path : '';
+  router.get('/preview-media/file', async (req, res) => {
     const name = typeof req.query.name === 'string' ? req.query.name : '';
-    if (!p || !name) return res.status(400).json({ error: 'path/name required' });
-    const abs = resolve(p);
-    if (!isWithinRoot(req.account?.root ?? null, abs)) {
-      return res.status(403).json({ error: 'outside root' });
-    }
     if (!/^[\w.-]+$/.test(name)) return res.status(400).json({ error: 'bad name' });
+    const abs = fileInRoot(req, res);
+    if (!abs) return;
     try {
-      const { dir } = extractPptxVideos(abs); // 캐시 적중이면 manifest 읽기만
+      const { dir } = await extractPptxVideos(abs); // 캐시 적중이면 manifest 읽기만
       const file = resolve(dir, name);
       if (!file.startsWith(resolve(dir)) || !statSafe(file)?.isFile()) {
         return res.status(404).json({ error: 'not found' });

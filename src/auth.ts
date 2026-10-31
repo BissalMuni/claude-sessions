@@ -27,14 +27,20 @@ export function accountId(token: string): string {
 }
 
 /**
- * 세션을 이 계정이 볼 수 있는가 — 세션의 작업 폴더(cwd)가 계정 root 서브트리 안이면 보인다.
+ * 세션을 이 계정이 볼 수 있는가 — 세션의 작업 폴더(cwd)와 세션 자체의 샌드박스(root)가
+ * 둘 다 계정 root 서브트리 안이면 보인다. cwd 만 보면 안 된다: 무제한 계정이 공유 폴더에서
+ * 연 세션(root=null)이나 더 넓은 root 의 세션을 제한 계정이 조종해 샌드박스를 벗어난다.
  * root 가 없는 계정(무제한)은 전부 본다. 같은 root 를 공유하는 계정들은 서로의 세션을
  * 공유한다(협업 — 누가 만들었는지(ownerId)는 표시용일 뿐 접근 기준이 아니다).
  */
-export function sessionVisibleTo(cwd: string | null | undefined, account?: Account): boolean {
+export function sessionVisibleTo(
+  s: { cwd: string | null | undefined; root: string | null },
+  account?: Account,
+): boolean {
   if (!account || !account.root) return true;
-  if (!cwd) return false; // cwd 를 모르는 세션은 샌드박스 계정에게 숨긴다(안전한 쪽으로)
-  return isWithinRoot(account.root, cwd);
+  // cwd 를 모르거나 무제한(root=null) 세션은 샌드박스 계정에게 숨긴다(안전한 쪽으로)
+  if (!s.cwd || !s.root) return false;
+  return isWithinRoot(account.root, s.root) && isWithinRoot(account.root, s.cwd);
 }
 
 // req.account: requireToken 이 검증 후 주입한다.

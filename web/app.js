@@ -119,9 +119,10 @@ async function pollSessions() {
 $('token-btn').onclick = () => {
   const id = $('id-input').value.trim();
   const pw = $('pw-input').value;
-  if (!id || !pw) return;
+  if (!pw) return;
   // 서버 자격증명은 "아이디:비밀번호" 합성 문자열 — 기존 Bearer/?token= 경로를 그대로 탄다.
-  state.token = id + ':' + pw;
+  // 아이디를 비우면 비번 칸 값을 토큰 원문으로 보낸다(단일 SCREEN_TOKEN 모드 — 아이디 없음).
+  state.token = id ? id + ':' + pw : pw;
   localStorage.setItem('sm_token', state.token);
   enterApp();
 };
@@ -144,6 +145,15 @@ $('logout-btn').onclick = () => {
   }
   state.sessions.clear();
   state.selected = null;
+  // 파일 탐색기 상태도 비운다 — 안 비우면 다음 계정 화면에 이전 계정의 파일/폴더가 남는다
+  state.openFile = null;
+  state.fileDir = '';
+  state.fileTreeFor = undefined;
+  state.treeOpen.clear();
+  $('file-tree').innerHTML = '';
+  $('file-pane').innerHTML = '';
+  updatePaneVisibility();
+  setSideTab('sessions');
   $('id-input').value = '';
   $('pw-input').value = '';
   showGate('');
@@ -640,7 +650,8 @@ function buildDetailShell(detail, s) {
   $('qa-prev').onclick = () => navProject(-1);
   $('qa-next').onclick = () => navProject(1);
   // 복사/인계: 이 대화를 클립보드에 복사하고, 같은 폴더로 새 세션을 열어 이어간다
-  $('qa-copy').onclick = () => copyAndMigrate(s);
+  // (s 는 셸 생성 시점 스냅샷 — WS/폴링이 객체를 갈아끼우므로 누를 때 최신 객체를 다시 꺼낸다)
+  $('qa-copy').onclick = () => copyAndMigrate(state.sessions.get(s.id) || s);
   // CPT: 이 세션 컨텍스트를 지금 압축(/compact)
   $('qa-compact').onclick = () => {
     if (!confirm('이 세션의 이전 대화를 지금 압축할까요?\n(요약본으로 줄여 토큰 재독 비용을 낮춥니다)')) return;
@@ -1083,12 +1094,6 @@ function readFileBase64(file) {
     r.onerror = () => reject(new Error('파일을 읽지 못했어요.'));
     r.readAsDataURL(file);
   });
-}
-
-function fmtSize(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function renderFiles(id) {
